@@ -8,6 +8,7 @@ import faulthandler
 import logging
 import os
 import signal
+import socket
 from pathlib import Path
 
 from aiohttp import web
@@ -49,6 +50,8 @@ def parse_args() -> argparse.Namespace:
                    default=os.environ.get("PIPAIR_SINK", "kms"),
                    help="gl renderer output: kms (HDMI via GBM), window (desktop), fake (headless)")
     p.add_argument("--no-autoplay", action="store_true", help="don't start the default playlist")
+    p.add_argument("--unpair", action="store_true",
+                   help="forget this device's partner (in --data) and exit")
     p.add_argument("--log-level", default=os.environ.get("PIPAIR_LOG", "info"))
     return p.parse_args()
 
@@ -101,11 +104,14 @@ async def wait_for_stop() -> None:
 async def run_head(args, data: Path, hw: dict) -> None:
     from .ble_peripheral import BlePeripheralLink
     from .head import Head
+    from .pairing import HeadLink, Identity
 
     store = Store(data / "state.json")
     library = MediaLibrary(data / "media", data / "cache", hw)
-    head = Head(store, library, make_backend_factory(args, hw), hw,
-                BlePeripheralLink(name=args.name))
+    name = args.name or socket.gethostname()
+    link = HeadLink(BlePeripheralLink(name=name), Identity(data / "pairing.json"), name)
+    head = Head(store, library, make_backend_factory(args, hw), hw, link)
+    link.on_notice = head.set_notice
     await head.start()
     log.info("head is up; media folder %s", library.media_dir)
     await wait_for_stop()
@@ -115,6 +121,12 @@ async def run_head(args, data: Path, hw: dict) -> None:
 async def main_async(args) -> None:
     data = Path(args.data).resolve()
     hw = hwmod.detect()
+    if args.unpair:
+        from .pairing import Identity
+
+        Identity(data / "pairing.json").set_peer(None)
+        print(f"Pairing forgotten ({data / 'pairing.json'}). Restart the service.")
+        return
     log.info("PiPair %s (%s) on %s; data in %s", __version__, args.role,
              hw["model"] or "non-Pi host", data)
     if args.role == "head":
@@ -131,22 +143,26 @@ async def main_async(args) -> None:
         kind = args.link
         if kind == "auto":
             kind = "ble" if hw["is_pi"] and args.backend != "sim" else "loopback"
+        from .pairing import ControllerLink, HeadLink, Identity
+
         if kind == "ble":
             from .ble_central import BleCentralLink
 
-            link = BleCentralLink(store.settings["link"]["peer"])
-            # A new peer applies from the next time the controller searches.
-            store.on_change(lambda what, _d: setattr(
-                link, "peer", store.settings["link"]["peer"].lower()) if what == "settings" else None)
+            radio = BleCentralLink()
         else:
             # Development: a head in this process, sharing the media folder.
+            # It starts out unpaired, like a real one: pair it in the web UI.
             from .head import Head
             from .link import LoopbackLink
 
-            link, head_link = LoopbackLink.pair()
+            radio, head_radio = LoopbackLink.pair()
+            head_link = HeadLink(head_radio, Identity(data / "head-pairing.json"),
+                                 "simulated head")
             inner_head = Head(Store(data / "head-state.json"), library,
                               make_backend_factory(args, hw), hw, head_link)
+            head_link.on_notice = inner_head.set_notice
             log.info("no Bluetooth: running a head inside this process")
+        link = ControllerLink(radio, Identity(data / "pairing.json"), socket.gethostname())
         port = HeadPort(link)
         audio = make_audio_factory(args, hw)
         factory = lambda settings, hw_, emit: PairBackend(settings, hw_, emit, audio, port)  # noqa: E731

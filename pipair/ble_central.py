@@ -1,37 +1,43 @@
-"""BLE transport for the controller: scans for the head and connects to it.
+"""BLE transport for the controller: looks for heads and connects to one.
 
-The controller is the GATT client (central). It writes packets to the head's
-RX characteristic without waiting for a response and receives packets as
-notifications on TX. If the connection drops it scans and connects again,
-forever.
+The controller is the GATT client (central). It scans for devices offering
+the PiPair service and keeps a list of the ones it has seen. `target` says
+which of them to connect to: one head's Bluetooth address, "" for none (just
+keep looking), or None for whichever turns up first. Once connected it
+writes packets to the head's RX characteristic without waiting for a
+response and receives packets as notifications on TX. If the connection
+drops it goes back to scanning, forever.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from .link import MAX_PACKET, MIN_PACKET, RX_UUID, SERVICE_UUID, TX_UUID, QueuedLink
 
 log = logging.getLogger(__name__)
 
-SCAN_SECONDS = 8.0
+SCAN_SECONDS = 6.0
 CONNECT_TIMEOUT = 15.0
 RETRY_SECONDS = 1.0
+SEEN_SECONDS = 45.0  # a head not heard from for this long leaves the list
 
 
 class BleCentralLink(QueuedLink):
     kind = "ble"
 
-    def __init__(self, peer: str = ""):
-        """`peer` picks one head by Bluetooth name or address; empty = any PiPair head."""
+    def __init__(self, target: str | None = None):
         super().__init__()
-        self.peer = peer.strip().lower()
+        self.target = target
         self.state = "starting"  # starting | searching | connecting | connected | error
         self.device_name: str | None = None
         self.device_address: str | None = None
         self.last_error: str | None = None
+        self.seen: dict[str, dict] = {}  # address -> what its advertisement said
         self._task: asyncio.Task | None = None
+        self._retarget = asyncio.Event()
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -42,14 +48,49 @@ class BleCentralLink(QueuedLink):
             await asyncio.gather(self._task, return_exceptions=True)
         self._set_connected(False)
 
-    def _match(self, device, adv) -> bool:
-        if SERVICE_UUID not in [u.lower() for u in (adv.service_uuids or [])]:
-            return False
-        if not self.peer:
+    def set_target(self, address: str | None) -> None:
+        if address != self.target:
+            self.target = address
+            self._retarget.set()  # ends a scan, or a connection to the wrong head
+
+    def drop(self) -> None:
+        self._retarget.set()
+
+    def discovered(self) -> list[dict]:
+        now = time.monotonic()
+        live = self.device_address if self.connected else None
+        return sorted(({"address": a, "name": d["name"], "rssi": d["rssi"],
+                        "connected": a == live}
+                       for a, d in self.seen.items()
+                       if a == live or now - d["t"] < SEEN_SECONDS),
+                      key=lambda d: -(d["rssi"] or -999))
+
+    def _wanted(self, address: str) -> bool:
+        if self.target is None:
             return True
-        names = {(device.address or "").lower(), (adv.local_name or "").lower(),
-                 (device.name or "").lower()}
-        return self.peer in names
+        return bool(self.target) and address.lower() == self.target.lower()
+
+    async def _find(self, scanner_cls):
+        """Scan for a while, noting every head; return the one we want, if seen."""
+        hits: list = []
+        found = asyncio.Event()
+
+        def on_advert(device, adv) -> None:
+            if SERVICE_UUID not in [u.lower() for u in (adv.service_uuids or [])]:
+                return
+            self.seen[device.address] = {"name": adv.local_name or device.name,
+                                         "rssi": adv.rssi, "t": time.monotonic()}
+            if self._wanted(device.address) and not hits:
+                hits.append(device)
+                found.set()
+
+        self._retarget.clear()
+        async with scanner_cls(detection_callback=on_advert, service_uuids=[SERVICE_UUID]):
+            waits = [asyncio.create_task(found.wait()), asyncio.create_task(self._retarget.wait())]
+            await asyncio.wait(waits, timeout=SCAN_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+            for w in waits:
+                w.cancel()
+        return hits[0] if hits and self._wanted(hits[0].address) else None
 
     async def _run(self) -> None:
         try:
@@ -63,8 +104,7 @@ class BleCentralLink(QueuedLink):
             pump: asyncio.Task | None = None
             try:
                 self.state = "searching"
-                device = await BleakScanner.find_device_by_filter(
-                    self._match, timeout=SCAN_SECONDS, service_uuids=[SERVICE_UUID])
+                device = await self._find(BleakScanner)
                 if device is None:
                     continue
                 self.state = "connecting"
@@ -78,16 +118,18 @@ class BleCentralLink(QueuedLink):
                     self.max_packet = self._packet_size(client)
                     await client.start_notify(TX_UUID, lambda _ch, data: self._packet_in(bytes(data)))
                     self.state, self.last_error = "connected", None
+                    self._retarget.clear()
                     self._set_connected(True)
 
                     async def write(packet: bytes) -> None:
                         await client.write_gatt_char(RX_UUID, packet, response=False)
 
                     pump = asyncio.create_task(self._pump(write))
-                    waiter = asyncio.create_task(lost.wait())
-                    done, _ = await asyncio.wait({pump, waiter},
-                                                 return_when=asyncio.FIRST_COMPLETED)
-                    waiter.cancel()
+                    waits = {pump, asyncio.create_task(lost.wait()),
+                             asyncio.create_task(self._retarget.wait())}
+                    done, pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                    for w in pending - {pump}:
+                        w.cancel()
                     if pump in done and pump.exception():
                         raise pump.exception()
                 log.info("head disconnected")
@@ -113,6 +155,5 @@ class BleCentralLink(QueuedLink):
         return max(MIN_PACKET, min(int(n), MAX_PACKET))
 
     def info(self) -> dict:
-        return {**super().info(), "state": self.state, "peer": self.peer or None,
-                "device": self.device_name, "address": self.device_address,
-                "last_error": self.last_error}
+        return {**super().info(), "state": self.state, "device": self.device_name,
+                "address": self.device_address, "last_error": self.last_error}

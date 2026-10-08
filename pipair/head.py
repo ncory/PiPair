@@ -59,6 +59,11 @@ class Head:
         self.stale: list[Layer] = []  # layers a reset has orphaned, still on screen
         self.top: Layer | None = None  # the layer most recently started
         self.orphan: Layer | None = None  # replacement being loaded while the link is down
+        # Text put on the display while the head is unpaired or pairing (see
+        # pairing.py). Never shown once the head has a controller.
+        self.notice_lines: list[str] | None = None
+        self.notice: Layer | None = None
+        self._notice_task: asyncio.Task | None = None
         self.last_ping = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tasks: list[asyncio.Task] = []
@@ -80,12 +85,14 @@ class Head:
         await self._start_backend()
         if not self.backend_ok:
             self._schedule_restart()
+        self._apply_notice()
         await self.link.start()
         self._tasks = [asyncio.create_task(self._report_loop()),
                        asyncio.create_task(self._media_loop())]
 
     async def shutdown(self) -> None:
-        for t in self._tasks + list(self.making.values()) + [self._restart_task]:
+        for t in self._tasks + list(self.making.values()) + [self._restart_task,
+                                                             self._notice_task]:
             if t:
                 t.cancel()
         await self.link.stop()
@@ -122,7 +129,7 @@ class Head:
         self.layers.clear()
         self.ids.clear()
         self.stale = []
-        self.top = self.orphan = None
+        self.top = self.orphan = self.notice = None
         if self.backend:
             try:
                 await self.backend.stop()
@@ -132,6 +139,7 @@ class Head:
         self._restart_task = None
         if not self.backend_ok:
             self._schedule_restart()
+        self._apply_notice()
         self._send_hello()
 
     def _schedule_restart(self, immediate: bool = False) -> None:
@@ -145,6 +153,33 @@ class Head:
             delay = RESTART_BACKOFF[min(self._restarts, len(RESTART_BACKOFF) - 1)]
             self._restarts += 1
         self._restart_task = asyncio.create_task(self._restart_backend(delay))
+
+    # --------------------------------------------------------------- notice
+    def set_notice(self, lines: list[str] | None) -> None:
+        """Show these lines of text on the display, or take the text down."""
+        if lines != self.notice_lines:
+            self.notice_lines = lines
+            self._apply_notice()
+
+    def _apply_notice(self) -> None:
+        if self._notice_task:
+            self._notice_task.cancel()
+            self._notice_task = None
+        if self.notice:
+            self._remove(self.notice)
+            self.notice = None
+        if self.notice_lines and self.backend and self.backend_ok:
+            self._notice_task = asyncio.create_task(self._make_notice(list(self.notice_lines)))
+
+    async def _make_notice(self, lines: list[str]) -> None:
+        try:
+            path = self.library.cache_dir / "notice.png"
+            await asyncio.to_thread(_render_notice, lines, self.backend.render_size, path)
+            self.notice = self.backend.create_layer(Source("image", path, "notice", "stretch"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a missing notice must not stop the head
+            log.exception("could not show %r", lines)
 
     # ----------------------------------------------------------------- time
     def _rt(self, t: float) -> float:
@@ -371,6 +406,12 @@ class Head:
             return
         if layer is None or layer.state == "removed":
             return
+        if layer is self.notice:
+            if event == "ready":
+                at = self.backend.now() + 0.05
+                self.backend.start_layer(layer, at)
+                self.backend.set_alpha(layer, [(at, 1.0)])
+            return
         if layer is self.orphan:
             self._orphan_event(event, layer)
             return
@@ -449,6 +490,34 @@ class Head:
             if files != self._media:
                 self._media = files
                 self.link.send({"t": "media", "files": files})
+
+
+def _render_notice(lines: list[str], size: tuple[int, int], path) -> None:
+    """White text centred on black; the last line (the code) is the big one."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    w, h = size
+    im = Image.new("RGB", (w, h), "black")
+    draw = ImageDraw.Draw(im)
+
+    def font(px: int):
+        try:
+            return ImageFont.load_default(size=px)  # Pillow >= 10.1
+        except TypeError:
+            return ImageFont.load_default()
+
+    sizes = [h // 12] * (len(lines) - 1) + [h // 5]
+    boxes = []
+    for text, px in zip(lines, sizes):
+        f = font(px)
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=f)
+        boxes.append((text, f, right - left, bottom - top, left, top))
+    gap = h // 20
+    y = (h - sum(b[3] for b in boxes) - gap * (len(boxes) - 1)) // 2
+    for text, f, tw, th, left, top in boxes:
+        draw.text(((w - tw) // 2 - left, y - top), text, font=f, fill="white")
+        y += th + gap
+    im.save(path)
 
 
 def _shrink(jpeg: bytes) -> bytes:

@@ -34,7 +34,8 @@ def short_videos(monkeypatch):
 class Rig:
     """A controller engine and a head, each with its own data folder."""
 
-    def __init__(self, tmp: Path, head_files=("a.mp4", "b.mp4"), ctrl_files=("a.mp4", "b.mp4")):
+    def __init__(self, tmp: Path, head_files=("a.mp4", "b.mp4"), ctrl_files=("a.mp4", "b.mp4"),
+                 secure: bool = False):
         self.tmp = tmp
         for side, names in (("ctrl", ctrl_files), ("head", head_files)):
             (tmp / side / "media").mkdir(parents=True)
@@ -42,6 +43,12 @@ class Rig:
                 (tmp / side / "media" / n).write_bytes(b"not really a video")
         self.link, self.head_link = LoopbackLink.pair(delay=0.002)
         self.head_link.clock = lambda: time.monotonic() + SKEW
+        if secure:  # the links the real program uses: paired, signed sessions
+            from pipair.pairing import ControllerLink, HeadLink, Identity
+
+            self.link = ControllerLink(self.link, Identity(tmp / "ctrl" / "pairing.json"), "ctrl")
+            self.head_link = HeadLink(self.head_link, Identity(tmp / "head" / "pairing.json"),
+                                      "the-head")
         self.head_backends: list[SimBackend] = []
         self.audio_backends: list[SimBackend] = []
         self.store = Store(tmp / "ctrl" / "state.json")
@@ -50,6 +57,8 @@ class Rig:
         self.head = Head(Store(tmp / "head" / "state.json"),
                          MediaLibrary(tmp / "head" / "media", tmp / "head" / "cache", HW),
                          self._head_backend, HW, self.head_link)
+        if secure:
+            self.head_link.on_notice = self.head.set_notice
         self.engine = Engine(self.store, self.lib, self._pair_backend, HW)
 
     def _head_backend(self, settings, hw, emit):
@@ -113,7 +122,9 @@ def synced_and_playing(rig: Rig):
     def check() -> bool:
         cur = rig.engine.current
         return bool(rig.port.ready and rig.engine.state == "playing" and cur
-                    and cur.id in rig.head.layers and rig.head_playing())
+                    and cur.id in rig.head.layers
+                    and rig.head.layers[cur.id].start_time is not None  # "start" has landed
+                    and rig.head_playing())
     return check
 
 
@@ -287,6 +298,55 @@ async def test_api_reports_the_link_and_files_the_head_lacks(tmp_path):
             await wait_for(lambda: "a.mp4" in rig.port.media)
             pl = await (await client.get("/api/playlists/default")).json()
             assert not any(it["head_warning"] for it in pl["items"])
+        finally:
+            await rig.port.stop()
+            await rig.head.shutdown()
+
+
+async def test_nothing_plays_on_the_head_until_it_is_paired_then_everything_does(tmp_path):
+    pytest.importorskip("PIL")
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from pipair.web import build_app
+
+    rig = Rig(tmp_path, secure=True)
+    app = build_app(rig.store, rig.lib, rig.engine, HW, None, rig.port)
+    async with TestClient(TestServer(app)) as client:
+        await rig.start(["a.mp4"])
+        try:
+            # Unpaired: sound only; the head's display says it is waiting to pair.
+            await wait_for(lambda: rig.engine.state == "playing" and rig.head.notice is not None
+                           and rig.head_playing())
+            assert not rig.port.ready and not rig.head.layers
+            assert [lyr.source.media for lyr in rig.head_playing()] == ["notice"]
+            link = await (await client.get("/api/link")).json()
+            assert link["pair_state"] == "unpaired" and link["paired"] is None
+            (found,) = link["heads"]
+
+            r = await client.post("/api/link/pair", json={"address": "no:such:head"})
+            assert r.status == 404
+            r = await client.post("/api/link/confirm")
+            assert r.status == 400  # nothing to confirm yet
+            await client.post("/api/link/pair", json={"address": found["address"]})
+            await wait_for(lambda: rig.link.state == "confirm")
+            link = await (await client.get("/api/link")).json()
+            assert rig.head.notice_lines == ["Pairing code", link["pairing"]["code"]]
+            link = await (await client.post("/api/link/confirm")).json()
+
+            # Paired: the notice goes, the item restarts on both, in step.
+            await wait_for(synced_and_playing(rig))
+            await wait_for(lambda: rig.head.notice is None and len(rig.head_playing()) == 1)
+            audio, picture = rig.start_times()
+            assert abs(audio - picture) < 0.02
+            status = await (await client.get("/api/status")).json()
+            assert status["output"]["link"]["pair_state"] == "ready"
+            assert status["output"]["link"]["paired"]["name"] == "the-head"
+
+            await client.post("/api/link/unpair")
+            await wait_for(lambda: not rig.port.ready and rig.head.notice_lines
+                           == ["the-head", "Ready to pair"])
+            assert rig.engine.state == "playing"  # the controller carries on with sound
         finally:
             await rig.port.stop()
             await rig.head.shutdown()

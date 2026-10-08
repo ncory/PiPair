@@ -45,10 +45,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "output": {"mode": "auto", "render_size": "auto", "fps": 30, "rotation": 0},
     "audio": {"enabled": True, "device": "auto", "volume": 100},
     "gpi": {"enabled": True, "inputs": []},
-    # The Bluetooth link to the head. `peer` is the head's Bluetooth name or
-    # address ("" = any PiPair head in range). `av_offset_ms` moves the
-    # picture relative to the sound (positive = picture later).
-    "link": {"peer": "", "av_offset_ms": 0},
+    # The link to the head. `av_offset_ms` moves the picture relative to the
+    # sound (positive = picture later). Which head it is, is set by pairing.
+    "link": {"av_offset_ms": 0},
 }
 
 # Settings that require the video pipeline to be rebuilt when changed.
@@ -144,10 +143,9 @@ def validate_settings(s: dict) -> dict:
     a["volume"] = _num(a["volume"], "audio.volume", 0, 100)
     out["gpi"] = validate_gpi(out["gpi"])
     ln = out["link"]
-    if not isinstance(ln, dict) or not isinstance(ln.get("peer"), str) or len(ln["peer"]) > 64:
-        raise ValidationError("link.peer must be a Bluetooth name or address (or empty)")
-    out["link"] = {"peer": ln["peer"].strip(),
-                   "av_offset_ms": int(_num(ln.get("av_offset_ms", 0), "link.av_offset_ms",
+    if not isinstance(ln, dict):
+        raise ValidationError("link must be an object")
+    out["link"] = {"av_offset_ms": int(_num(ln.get("av_offset_ms", 0), "link.av_offset_ms",
                                             -MAX_AV_OFFSET_MS, MAX_AV_OFFSET_MS))}
     return out
 

@@ -2,7 +2,7 @@
 /* PiPair web UI — plain JS, no build step. Talks to the REST API in docs/API.md. */
 
 const $ = (sel, root = document) => root.querySelector(sel);
-const S = { status: null, playlists: [], media: [], settings: null, system: null,
+const S = { link: null, status: null, playlists: [], media: [], settings: null, system: null,
             selected: null, draft: null, dirty: false, cueTransition: null,
             gpi: null, gpiDraft: null, gpiDirty: false };
 
@@ -77,9 +77,10 @@ function connect() {
     else if (m.type === "playlist") loadPlaylists();
     else if (m.type === "settings") { loadSettings(); loadGpi(); }
     else if (m.type === "gpi") onGpiEvent(m);
+    else if (m.type === "link") { loadLink(); loadSystem().catch(() => {}); }
   };
 }
-async function loadAll() { await Promise.all([loadPlaylists(), loadMedia(), loadSettings(), loadSystem(), loadGpi()]); renderSettings(); }
+async function loadAll() { await Promise.all([loadPlaylists(), loadMedia(), loadSettings(), loadSystem(), loadGpi(), loadLink()]); renderSettings(); }
 async function loadPlaylists() {
   S.playlists = await api("GET", "/api/playlists");
   renderQuick(); renderPlaylistList(); renderNow();
@@ -91,6 +92,16 @@ async function loadPlaylists() {
 async function loadMedia() { S.media = await api("GET", "/api/media"); renderMedia(); if (S.draft) renderEditor(); }
 async function loadSettings() { S.settings = await api("GET", "/api/settings"); renderSettings(); renderPlaylistList(); }
 async function loadSystem() { S.system = await api("GET", "/api/system"); renderSys(); }
+async function loadLink() {
+  let link = null;
+  try { link = await api("GET", "/api/link"); } catch {}
+  // Redraw only on a change, so a button isn't replaced under the pointer.
+  const same = JSON.stringify(link) === JSON.stringify(S.link);
+  S.link = link;
+  if (!same) { renderPairing(); renderLink(); }
+}
+// The list of heads in range only matters, and only changes, while choosing one.
+setInterval(() => { if (!document.hidden && S.link && !S.link.paired && $("#tab-settings").classList.contains("active")) loadLink(); }, 3000);
 setInterval(() => { if (!document.hidden) loadSystem().catch(() => {}); }, 10000);
 
 // ------------------------------------------------------------------ tabs
@@ -208,14 +219,55 @@ function renderCurrentItems() {
 function linkState(l) {
   if (!l) return null;
   if (l.ready) return ["ok", "Head connected"];
+  if (l.pair_state === "unpaired") return ["wait", "No head paired"];
+  if (l.pair_state === "pairing" || l.pair_state === "confirm") return ["wait", "Pairing…"];
+  if (l.pair_state === "rejected") return ["", "Head refused us"];
   if (l.connected) return ["wait", l.head && l.head.ok === false ? (l.head.no_display ? "Head has no display" : "Head renderer down") : "Head syncing…"];
   return ["", l.state === "error" ? "Bluetooth error" : "Searching for head…"];
 }
 function renderLink() {
-  const l = S.status?.output?.link || S.system?.link, el = $("#link"), st = linkState(l);
+  // S.link is the freshest word on pairing; the status carries the rest.
+  const base = S.status?.output?.link || S.system?.link;
+  const l = base && S.link ? { ...base, pair_state: S.link.pair_state, reason: S.link.reason, ready: base.ready && S.link.pair_state === "ready" } : base;
+  const el = $("#link"), st = linkState(l);
   el.hidden = !st; if (!st) return;
   el.className = "linkpill " + st[0]; el.textContent = st[1];
-  el.title = l.ready ? `${l.head?.name || l.device || "head"} · round trip ${l.rtt_ms ?? "?"} ms` : (l.last_error || "");
+  el.title = l.ready ? `${l.head?.name || l.device || "head"} · round trip ${l.rtt_ms ?? "?"} ms` : (l.reason || l.last_error || "");
+}
+
+// Settings: which head this controller drives.
+function renderPairing() {
+  const box = $("#pairing"), l = S.link;
+  box.hidden = !l; if (!l) return;
+  const post = (path, body, ok) => act(() => api("POST", "/api/link/" + path, body), ok).then((r) => { S.link = r; renderPairing(); renderLink(); }).catch(() => {});
+  const kids = [h("h3", {}, "Head pairing")];
+  const p = l.pairing;
+  if (l.paired) {
+    const st = l.pair_state === "ready" ? "connected" : l.pair_state === "rejected" ? `refused: ${l.reason}` : "searching…";
+    kids.push(h("div", { class: "row" },
+      h("div", { class: "field" }, h("span", {}, "Paired with"), h("strong", {}, l.paired.name || "head"), " ", h("span", { class: "muted small" }, `${l.paired.address} · ${st}`)),
+      h("button", { class: "btn danger", type: "button", onclick: () => { if (confirm("Forget this head? It will go back to showing “Ready to pair”.")) post("unpair", null, "Head forgotten"); } }, "Forget this head")),
+      h("p", { class: "hint" }, "This controller only talks to this head, and the head only obeys this controller. If the head was reset or re-installed, forget it here and pair again."));
+  } else if (p && p.code) {
+    kids.push(h("p", {}, "The head should now be showing a code on its display. Does it show this one?"),
+      h("div", { class: "pair-code" }, p.code),
+      h("div", { class: "row" },
+        h("button", { class: "btn primary", type: "button", onclick: () => post("confirm", null, "Paired") }, "Yes, the codes match"),
+        h("button", { class: "btn", type: "button", onclick: () => post("cancel") }, "No / cancel")),
+      h("p", { class: "hint" }, "If the head shows a different code, or none, cancel: you may be talking to a different head."));
+  } else if (p) {
+    kids.push(h("p", {}, `Connecting to ${p.name || p.address}…`),
+      h("button", { class: "btn", type: "button", onclick: () => post("cancel") }, "Cancel"));
+  } else {
+    if (l.reason) kids.push(h("p", { class: "hint", style: { color: "var(--warn)" } }, l.reason));
+    kids.push(h("p", {}, "No head is paired. Heads in range:"),
+      l.heads.length ? h("ul", { class: "heads" }, ...l.heads.map((d) => h("li", {},
+        h("span", { class: "hname" }, d.name || "PiPair head"), h("span", { class: "muted small grow" }, `${d.address} · signal ${d.rssi ?? "?"} dBm`),
+        h("button", { class: "btn primary small", type: "button", onclick: () => post("pair", { address: d.address }) }, "Pair"))))
+        : h("p", { class: "muted" }, "None yet. A head that is switched on and unpaired shows “Ready to pair” on its display."),
+      h("p", { class: "hint" }, "Pairing ties this controller to one head. The head shows a 4-digit code on its display for you to compare, so you know which one you picked."));
+  }
+  box.replaceChildren(...kids);
 }
 
 function renderSys() {
@@ -586,13 +638,9 @@ function renderSettings() {
     paired ? h("fieldset", {}, h("legend", {}, "Head"),
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", {}, "Picture offset (ms)"),
-          h("input", { type: "number", name: "av_offset_ms", min: -2000, max: 2000, step: 5, value: s.link.av_offset_ms, style: { width: "110px" } })),
-        h("label", { class: "field" }, h("span", {}, "Head to connect to"),
-          h("input", { type: "text", name: "link_peer", value: s.link.peer, placeholder: "any PiPair head", style: { width: "220px" } }))),
+          h("input", { type: "number", name: "av_offset_ms", min: -2000, max: 2000, step: 5, value: s.link.av_offset_ms, style: { width: "110px" } }))),
       h("p", { class: "hint" },
-        "Picture offset moves the picture against the sound: a positive number shows it later, a negative one earlier. Use it to line up lips and voice once the projector and speakers are in place. Saving a new offset restarts the current item."),
-      h("p", { class: "hint" },
-        "Leave the head blank to use whichever PiPair head is in range, or enter one head's Bluetooth name (its hostname) or address when several are nearby.")) : null,
+        "Picture offset moves the picture against the sound: a positive number shows it later, a negative one earlier. Use it to line up lips and voice once the projector and speakers are in place. Saving a new offset restarts the current item.")) : null,
     h("fieldset", {}, h("legend", {}, "Audio"),
       h("div", { class: "row" },
         h("label", { class: "check" }, h("input", { type: "checkbox", name: "audio_enabled", checked: s.audio.enabled }), "Play audio"),
@@ -623,7 +671,7 @@ function renderSettings() {
       output: kmsMode ? { mode: v("mode") }
         : { mode: v("mode"), render_size: v("render_size"), fps: Number(v("fps")), rotation: Number(v("rotation")) },
       audio: { enabled: f.elements.audio_enabled.checked, device: v("audio_device") || "auto", volume: Number(v("volume")) },
-      ...(paired ? { link: { peer: v("link_peer").trim(), av_offset_ms: Number(v("av_offset_ms")) || 0 } } : {}),
+      ...(paired ? { link: { av_offset_ms: Number(v("av_offset_ms")) || 0 } } : {}),
     }), "Settings saved");
     document.activeElement?.blur(); await loadSettings();
   };

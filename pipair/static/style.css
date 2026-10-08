@@ -33,6 +33,11 @@ h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacin
 .linkpill { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; margin-right: 10px; white-space: nowrap;
   background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err); }
 .linkpill.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.pair-code { font-size: 44px; font-weight: 700; letter-spacing: .18em; font-variant-numeric: tabular-nums; margin: 6px 0 10px; }
+.heads { list-style: none; margin: 8px 0 0; padding: 0; }
+.heads li { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.heads li:first-child { border-top: 0; }
+.heads .hname { font-weight: 600; } .heads .grow { flex: 1; }
 .linkpill.wait { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
 
 main { max-width: 1280px; margin: 0 auto; padding: 16px; }

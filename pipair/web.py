@@ -76,8 +76,12 @@ class Api:
         self.hw = hw
         self.gpi = gpi
         self.port = port  # backend_pair.HeadPort when there is a head, else None
+        # pairing.ControllerLink when heads are paired with, else None
+        self.pairing = port.link if port and hasattr(port.link, "confirm") else None
         if port:
             port.on_change(self._head_changed)
+        if self.pairing:
+            self.pairing.on_change(lambda: self.broadcast({"type": "link"}))
         if gpi:
             gpi.on_event(self.broadcast)
         self.sockets: set[web.WebSocketResponse] = set()
@@ -126,6 +130,7 @@ class Api:
         """The link went up or down, or the head's files changed."""
         self.broadcast({"type": "media"})
         self.broadcast({"type": "status", "status": self.engine.status()})
+        self.broadcast({"type": "link"})
 
     def head_warning(self, name: str, size: int | None = None) -> str | None:
         """Why the head can't show this file, if we know it can't."""
@@ -350,6 +355,39 @@ class Api:
         gpi.fire(request.match_info["id"], source="API")
         return _json(gpi.state())
 
+    # ----------------------------------------------------------------- link
+    def _pairing(self):
+        if self.pairing is None:
+            raise web.HTTPServiceUnavailable(text="this player has no head to pair with")
+        return self.pairing
+
+    def link_out(self) -> dict:
+        p = self._pairing()
+        return {**p.info(), "heads": p.discovered()}
+
+    async def get_link(self, request):
+        return _json(self.link_out())
+
+    async def link_pair(self, request):
+        body = await self.params(request)
+        address = body.get("address")
+        if not isinstance(address, str) or not address:
+            raise ValidationError("address is required")
+        self._pairing().pair(address)
+        return _json(self.link_out())
+
+    async def link_confirm(self, request):
+        self._pairing().confirm()
+        return _json(self.link_out())
+
+    async def link_cancel(self, request):
+        self._pairing().cancel()
+        return _json(self.link_out())
+
+    async def link_unpair(self, request):
+        self._pairing().unpair()
+        return _json(self.link_out())
+
     # --------------------------------------------------------------- system
     async def system(self, request):
         return _json({
@@ -432,6 +470,11 @@ def build_app(store: Store, library: MediaLibrary, engine: Engine, hw: dict,
     r.add_put("/api/gpi", api.put_gpi)
     r.add_post("/api/gpi/{id}/fire", api.fire_gpi)
     r.add_get("/api/gpi/{id}/fire", api.fire_gpi)
+    r.add_get("/api/link", api.get_link)
+    r.add_post("/api/link/pair", api.link_pair)
+    r.add_post("/api/link/confirm", api.link_confirm)
+    r.add_post("/api/link/cancel", api.link_cancel)
+    r.add_post("/api/link/unpair", api.link_unpair)
     r.add_get("/api/system", api.system)
     r.add_post("/api/system/restart-renderer", api.restart_renderer)
     r.add_get("/api/preview.jpg", api.preview)

@@ -21,6 +21,8 @@ at T" in the head's own time.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import struct
@@ -42,6 +44,10 @@ MAX_PACKET = 244  # one LE data packet with data length extension
 MAX_MESSAGE = 4 << 20
 MAX_QUEUE = 400  # messages waiting to be sent before new ones are refused
 
+SEALED = 0x01  # first byte of a signed message (plain ones start with "{" or 0x00)
+TAG_BYTES = 8
+LOOPBACK_ADDRESS = "sim:head"
+
 MessageFn = Callable[[dict, bytes, float], None]
 StateFn = Callable[[bool], None]
 
@@ -62,6 +68,24 @@ def decode(data: bytes) -> tuple[dict, bytes]:
     if not isinstance(msg, dict):
         raise ValueError("message is not an object")
     return msg, blob
+
+
+def seal(key: bytes, counter: int, data: bytes) -> bytes:
+    """Sign one encoded message: marker, counter, the message, truncated HMAC."""
+    head = bytes([SEALED]) + struct.pack(">I", counter)
+    tag = hmac.new(key, head + data, hashlib.sha256).digest()[:TAG_BYTES]
+    return head + data + tag
+
+
+def unseal(key: bytes, sealed: bytes) -> tuple[int, bytes] | None:
+    """(counter, message) if the signature is good, else None."""
+    if len(sealed) < 5 + TAG_BYTES or sealed[0] != SEALED:
+        return None
+    body, tag = sealed[:-TAG_BYTES], sealed[-TAG_BYTES:]
+    good = hmac.new(key, body, hashlib.sha256).digest()[:TAG_BYTES]
+    if not hmac.compare_digest(tag, good):
+        return None
+    return struct.unpack(">I", body[1:5])[0], body[5:]
 
 
 def fragment(data: bytes, max_packet: int) -> list[bytes]:
@@ -153,6 +177,15 @@ class Link:
     full), in which case the message is gone. ``stamp`` names a field that
     is set to this end's clock at the moment the message actually leaves, so
     time spent queued does not count against a ping.
+
+    Once the two ends share session keys (see pairing.py) a message can be
+    sent ``sealed``: signed and numbered, so the receiver can tell it came
+    from its partner and is not a replay. ``rx_sealed`` says whether the
+    message being delivered was.
+
+    A controller's transport can also look around: ``discovered()`` lists
+    the heads it can see, and ``target`` picks which one it connects to
+    (None = any, "" = none, else that head's address).
     """
 
     kind = "none"
@@ -160,8 +193,14 @@ class Link:
     def __init__(self) -> None:
         self.connected = False
         self.clock: Callable[[], float] = time.monotonic
+        self.target: str | None = None
+        self.rx_sealed = False
         self._on_message: MessageFn | None = None
         self._on_state: StateFn | None = None
+        self._tx_key: bytes | None = None
+        self._rx_key: bytes | None = None
+        self._tx_n = 0
+        self._rx_n = 0
 
     def set_handlers(self, on_message: MessageFn, on_state: StateFn) -> None:
         self._on_message = on_message
@@ -170,19 +209,56 @@ class Link:
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
 
-    def send(self, msg: dict, blob: bytes = b"", stamp: str | None = None) -> bool:
+    def send(self, msg: dict, blob: bytes = b"", stamp: str | None = None,
+             sealed: bool = False) -> bool:
         raise NotImplementedError
 
     def info(self) -> dict:
         return {"transport": self.kind, "connected": self.connected}
 
+    def discovered(self) -> list[dict]:
+        return []
+
+    def set_target(self, address: str | None) -> None:
+        self.target = address
+
+    def drop(self) -> None:
+        """Disconnect whoever is connected. The transport may connect again."""
+
+    def set_session(self, tx_key: bytes, rx_key: bytes) -> None:
+        self._tx_key, self._rx_key = tx_key, rx_key
+        self._tx_n = self._rx_n = 0
+
+    def clear_session(self) -> None:
+        self._tx_key = self._rx_key = None
+
     # -- for transports ------------------------------------------------------
+    def _pack(self, msg: dict, blob: bytes, stamp: str | None, sealed: bool) -> bytes | None:
+        """Encode a message as it leaves: stamp it, then sign it if asked."""
+        if stamp:
+            msg = {**msg, stamp: round(self.clock(), 5)}
+        data = encode(msg, blob)
+        if not sealed:
+            return data
+        if self._tx_key is None:
+            return None  # the session ended while this was queued
+        self._tx_n += 1
+        return seal(self._tx_key, self._tx_n, data)
+
     def _deliver(self, data: bytes, rx: float) -> None:
+        sealed = data[:1] == bytes([SEALED])
+        if sealed:
+            opened = unseal(self._rx_key, data) if self._rx_key else None
+            if opened is None or opened[0] <= self._rx_n:
+                log.warning("dropping a message that is not from our partner")
+                return
+            self._rx_n, data = opened
         try:
             msg, blob = decode(data)
         except (ValueError, struct.error):
             log.warning("dropping a malformed message (%d bytes)", len(data))
             return
+        self.rx_sealed = sealed
         if self._on_message:
             try:
                 self._on_message(msg, blob, rx)
@@ -208,15 +284,16 @@ class QueuedLink(Link):
         super().__init__()
         self.max_packet = MIN_PACKET
         self.reasm = Reassembler()
-        self._queue: deque[tuple[dict, bytes, str | None]] = deque()
+        self._queue: deque[tuple[dict, bytes, str | None, bool]] = deque()
         self._wake = asyncio.Event()
         self.sent = 0
         self.received = 0
 
-    def send(self, msg: dict, blob: bytes = b"", stamp: str | None = None) -> bool:
+    def send(self, msg: dict, blob: bytes = b"", stamp: str | None = None,
+             sealed: bool = False) -> bool:
         if not self.connected or len(self._queue) >= MAX_QUEUE:
             return False
-        self._queue.append((msg, blob, stamp))
+        self._queue.append((msg, blob, stamp, sealed))
         self._wake.set()
         return True
 
@@ -230,6 +307,7 @@ class QueuedLink(Link):
     def _flush(self) -> None:
         self._queue.clear()
         self.reasm.reset()
+        self.clear_session()
 
     async def _pump(self, write: Callable[[bytes], object]) -> None:
         """Send queued messages through `write` (sync or async) until cancelled."""
@@ -237,10 +315,10 @@ class QueuedLink(Link):
             while not self._queue:
                 self._wake.clear()
                 await self._wake.wait()
-            msg, blob, stamp = self._queue.popleft()
-            if stamp:
-                msg = {**msg, stamp: round(self.clock(), 5)}
-            for packet in fragment(encode(msg, blob), self.max_packet):
+            data = self._pack(*self._queue.popleft())
+            if data is None:
+                continue
+            for packet in fragment(data, self.max_packet):
                 r = write(packet)
                 if asyncio.iscoroutine(r):
                     await r
@@ -258,7 +336,8 @@ class LoopbackLink(Link):
 
     Messages go through the real encoder, packetizer and reassembler, and
     arrive after `delay` seconds. Each end has its own clock, so a test can
-    give the two ends clocks that disagree.
+    give the two ends clocks that disagree. The "head" end is discoverable
+    under LOOPBACK_ADDRESS, and the link honours `target` like a radio does.
     """
 
     kind = "loopback"
@@ -270,6 +349,7 @@ class LoopbackLink(Link):
         self.peer: LoopbackLink | None = None
         self.reasm = Reassembler()
         self.started = False
+        self.cut = False
 
     @classmethod
     def pair(cls, delay: float = 0.002,
@@ -280,27 +360,56 @@ class LoopbackLink(Link):
 
     async def start(self) -> None:
         self.started = True
-        if self.peer and self.peer.started:
-            self.set_up(True)
+        self._refresh()
 
     async def stop(self) -> None:
         self.started = False
-        self.set_up(False)
+        self._refresh()
 
     def set_up(self, up: bool) -> None:
         """Connect or cut the link (both ends see it)."""
         for end in (self, self.peer):
             if end:
-                end.reasm.reset()
-                end._set_connected(up and bool(self.peer) and self.started and self.peer.started)
+                end.cut = not up
+        self._refresh()
 
-    def send(self, msg: dict, blob: bytes = b"", stamp: str | None = None) -> bool:
+    def set_target(self, address: str | None) -> None:
+        self.target = address
+        self._refresh()
+
+    def drop(self) -> None:
+        if self.connected:
+            self._apply(False)
+            asyncio.get_running_loop().call_later(0.05, self._refresh)
+
+    def discovered(self) -> list[dict]:
+        if not (self.peer and self.peer.started):
+            return []
+        return [{"address": LOOPBACK_ADDRESS, "name": "simulated head", "rssi": -40,
+                 "connected": self.connected}]
+
+    def _refresh(self) -> None:
+        ends = [e for e in (self, self.peer) if e]
+        up = (len(ends) == 2 and all(e.started and not e.cut for e in ends)
+              and all(e.target in (None, LOOPBACK_ADDRESS) for e in ends))
+        self._apply(up)
+
+    def _apply(self, up: bool) -> None:
+        for end in (self, self.peer):
+            if end and end.connected != up:
+                end.reasm.reset()
+                end.clear_session()
+                end._set_connected(up)
+
+    def send(self, msg: dict, blob: bytes = b"", stamp: str | None = None,
+             sealed: bool = False) -> bool:
         peer = self.peer
         if not self.connected or peer is None:
             return False
-        if stamp:
-            msg = {**msg, stamp: round(self.clock(), 5)}
-        packets = fragment(encode(msg, blob), self.max_packet)
+        data = self._pack(msg, blob, stamp, sealed)
+        if data is None:
+            return False
+        packets = fragment(data, self.max_packet)
         asyncio.get_running_loop().call_later(self.delay, peer._receive, packets)
         return True
 

@@ -207,7 +207,7 @@ Send only the fields to change; nested objects are merged.
   "output": {"mode": "auto"},
   "audio": {"enabled": true, "device": "auto", "volume": 100},
   "gpi": {"enabled": true, "inputs": []},
-  "link": {"peer": "", "av_offset_ms": 0}
+  "link": {"av_offset_ms": 0}
 }
 ```
 
@@ -219,7 +219,6 @@ Send only the fields to change; nested objects are merged.
 | `output.render_size`, `output.fps`, `output.rotation` | Only used by the optional GL-compositing renderer (`--backend gl`). |
 | `audio.device` | `auto` or an ALSA device string such as `default:CARD=Headphones`. On the controller `auto` is a USB or HAT sound card if one is fitted, otherwise the 3.5 mm jack, otherwise HDMI. |
 | `link.av_offset_ms` | Moves the picture against the sound, in milliseconds (-2000 to 2000). Positive shows the picture later. Changing it restarts the current item. |
-| `link.peer` | Which head to connect to: its Bluetooth name (its hostname) or address. Empty connects to any PiPair head in range. |
 | `audio.volume` | 0-100; applies live. |
 
 Changing `output.*`, `audio.enabled` or `audio.device` restarts the renderer (about 1-2 s of black), then resumes the current item.
@@ -252,6 +251,36 @@ The API is served by the controller. The picture is shown by the head, which the
 | `head.ok` | `false` while the head's renderer is down; `head.no_display` says whether that is for want of a display. |
 
 While the head is away the controller keeps playing sound and the head keeps showing (and looping) the clip it had. When the head becomes `ready` the current item restarts on both, so they start together.
+
+### Pairing
+
+A controller drives one head: the one it has been paired with. `GET /api/link` returns the link object above plus:
+
+```json
+{
+  "pair_state": "unpaired",
+  "reason": null,
+  "paired": null,
+  "pairing": null,
+  "heads": [{"address": "B8:27:EB:12:34:56", "name": "pipair-head", "rssi": -52, "connected": false}]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `pair_state` | `unpaired`, `pairing` (connecting to the chosen head), `confirm` (waiting for the user to compare codes), `searching`, `authenticating`, `ready`, or `rejected` (the paired head turned this controller away; see `reason`). |
+| `paired` | `{"name", "address"}` of the paired head, or `null`. |
+| `pairing` | `{"address", "name", "code"}` while a pairing is under way. `code` is the 4 digits the head should be showing; it is `null` until the head has answered. |
+| `heads` | PiPair heads seen recently, strongest signal first. Not refreshed while a head is connected. |
+
+| Method & path | Body | Effect |
+|---|---|---|
+| `POST /api/link/pair` | `{"address": "..."}` | Start pairing with that head. 400 if a head is already paired, 404 if the address is not in `heads`. |
+| `POST /api/link/confirm` | | The codes match: finish pairing. Only confirm after a person has compared the code with the head's display; confirming blindly gives up the protection the code provides. |
+| `POST /api/link/cancel` | | Abandon the pairing. |
+| `POST /api/link/unpair` | | Forget the paired head, and release it if it is connected. |
+
+All four return the same object as `GET /api/link`. The WebSocket sends `{"type": "link"}` whenever any of it changes.
 
 Media files must be on both devices under the same name. `GET /api/media` adds a warning to each file the head lacks, and playlist items carry `head_warning` (a string, or `null`).
 

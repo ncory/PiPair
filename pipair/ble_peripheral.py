@@ -73,8 +73,9 @@ class _Characteristic(ServiceInterface):
     @method()
     def WriteValue(self, value: "ay", options: "a{sv}"):
         if self.on_write:
-            mtu = options.get("mtu")
-            self.on_write(bytes(value), mtu.value if mtu is not None else None)
+            mtu, device = options.get("mtu"), options.get("device")
+            self.on_write(bytes(value), mtu.value if mtu is not None else None,
+                          device.value if device is not None else None)
 
     @method()
     def StartNotify(self):
@@ -132,6 +133,7 @@ class BlePeripheralLink(QueuedLink):
         self._pump_task = None
         self._bus = None
         self._tx = None
+        self._peer_path = None  # D-Bus path of the device that last wrote to us
 
     async def start(self):
         self._task = asyncio.create_task(self._run())
@@ -179,7 +181,22 @@ class BlePeripheralLink(QueuedLink):
             .call_register_advertisement(BASE + "/adv0", {})
 
     # -- BlueZ callbacks -------------------------------------------------------
-    def _on_write(self, packet, mtu):
+    def drop(self):
+        """Disconnect the connected device (used on callers that don't identify themselves)."""
+        if self._bus and self._peer_path:
+            asyncio.create_task(self._disconnect(self._peer_path))
+
+    async def _disconnect(self, path):
+        try:
+            intro = await self._bus.introspect(BLUEZ, path)
+            device = self._bus.get_proxy_object(BLUEZ, path, intro)
+            await device.get_interface("org.bluez.Device1").call_disconnect()
+        except Exception as e:  # noqa: BLE001 - it may already be gone
+            log.debug("could not disconnect %s: %s", path, e)
+
+    def _on_write(self, packet, mtu, device=None):
+        if device:
+            self._peer_path = device
         if mtu:
             self.max_packet = max(MIN_PACKET, min(int(mtu) - 3, MAX_PACKET))
         self._packet_in(packet)

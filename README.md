@@ -9,7 +9,8 @@ PiPair is a fork of [PiPlayer](https://github.com/ncory/PiPlayer) and keeps its 
 - **Link**: Bluetooth LE. It carries only clock pings and small commands ("start this clip at time T"), never the media, so it needs almost no bandwidth and tolerates a crowded 2.4 GHz band.
 - **Playlists** of videos and still images, with **cut**, **dissolve** and **dip to color** transitions, per-item position offsets, GPIO triggers, and a live preview of the head's picture.
 - If the link drops, the sound carries on and the head keeps showing, and loops, the clip it had. When the link returns the current item restarts on both, together.
-- No authentication, and anyone in Bluetooth range could drive the head. Meant for a trusted LAN and a friendly room.
+- **Pairing**: a controller and a head are paired once, with a code shown on the head's display. After that each talks only to the other, so several sets can run side by side.
+- The web UI and API have no authentication. Meant for a trusted LAN.
 
 ## Hardware
 
@@ -35,7 +36,7 @@ Install from this checkout on your computer (asks for each Pi's password):
 ./scripts/push.sh you@pipair.local controller
 ```
 
-Reboot both once. The head then advertises itself over Bluetooth under its hostname, and the controller finds it and connects by itself; there is no pairing step. Open `http://pipair.local/`. The pill in the top bar reads **Head connected** when the two are in step.
+Reboot both once, then pair them (next section). The pill in the top bar of `http://pipair.local/` reads **Head connected** when the two are in step.
 
 Run the same `push.sh` command again to update; the role is remembered, and playlists, settings and media are kept.
 
@@ -56,6 +57,24 @@ The installer:
 The hardware H.264 decoder allocates from the firmware's video memory pool, which `gpu_mem` sizes. At 1080p one clip costs about 26 MB, and a dissolve needs roughly 27 MB more, because two clips and the freeze buffer are alive at once. Raspberry Pi OS ships with `gpu_mem=76`, which leaves about 2 MB spare: the first dissolve scrapes through and a later one fails with `Failed to allocate required memory`, taking the renderer down until the Pi is rebooted.
 
 The installer therefore appends `gpu_mem=128` to `/boot/firmware/config.txt` (backing the file up first), which roughly doubles the pool and leaves around 27 MB of headroom. It applies at the next reboot. The installer never overrides a `gpu_mem` you have set yourself; it warns instead if yours is lower. It is skipped on the Pi 5, which has no firmware decoder, and on boards with less than 1 GB of RAM. Use `--no-gpu-mem` to leave `config.txt` untouched.
+
+## Pairing
+
+A new head shows its name and **Ready to pair** on its display. To pair:
+
+1. Open the controller's web UI → Settings → **Head pairing**. Heads in range are listed with their name, Bluetooth address and signal strength.
+2. Click **Pair** next to yours. The head's display changes to a 4-digit **pairing code**, and the same code appears in the UI.
+3. If they match, click **Yes, the codes match**. If the head shows a different code or none, you picked another head: cancel.
+
+That is all, and it is kept across reboots. From then on the controller connects only to that head, the head obeys only that controller, and a paired head never puts text on its display.
+
+To change partners, use **Forget this head** on the controller. That also releases the head if it is in range. A head whose controller is gone can be released on the head itself:
+
+```bash
+sudo /opt/pipair/scripts/unpair.sh
+```
+
+What pairing protects against: another PiPair controller (or anyone with a Bluetooth radio) connecting to your head and driving it, and your controller latching onto somebody else's head. Each connection starts with both sides proving they hold the shared key, and every message after that is signed and numbered, so forged, altered or replayed commands are dropped. Messages are not encrypted, since nothing in them is secret, and nothing stops a radio jammer.
 
 ## Media
 
@@ -131,7 +150,8 @@ pipair/
   backend_audio.py   audio-only GStreamer renderer                      (controller)
   head.py            executes the controller's commands on a video renderer (head)
   backend_kms.py     hardware-plane video renderer                      (head)
-  link.py            message format, packet framing, clock sync, loopback link
+  link.py            message format, packet framing, signing, clock sync, loopback link
+  pairing.py         pairing, per-connection authentication, who-talks-to-whom
   ble_central.py     Bluetooth LE transport, controller side (bleak)
   ble_peripheral.py  Bluetooth LE transport, head side (BlueZ GATT server over D-Bus)
   backend_gst.py     GStreamer layer machinery shared by the renderers
@@ -152,6 +172,7 @@ engine ─ PairBackend ─┬─ AudioBackend ─ speakers
 - **Commands.** A handful of small JSON messages: `new` (load a file), `start` (at T), `alpha` (keyframes), `dip`, `pos`, `pause`/`resume`, `rm`. A message is split into BLE packets with a one-byte header and reassembled on the other side.
 - **Scheduling.** Cues are scheduled 0.25-0.6 s ahead so they cross the radio before their time comes.
 - **Images** are fitted to the display on the head, at its resolution.
+- **Pairing.** An X25519 key exchange; the controller commits to its key before seeing the head's, so the 4-digit code is enough to rule out someone in the middle. The shared key is stored in `pairing.json` on each device. Every connection then runs a three-message challenge-response and derives two session keys; each message carries a counter and an 8-byte HMAC. It all sits between the transport and the rest of the program (`pairing.py`), which only ever sees "connected" once the partner has proved itself.
 - **Losing the head.** The controller treats a missing head as "nothing to wait for": the engine keeps running on sound alone. The head, hearing no pings for 3 s, loops the clip on screen when it ends. A head that (re)appears makes the engine restart the current item on a fresh renderer, which is the only way to start both together.
 
 The video path on the head is PiPlayer's: decoded frames go straight onto hardware display planes, and the display controller positions, scales and alpha-blends them. See PiPlayer's README for the details.
@@ -159,7 +180,9 @@ The video path on the head is PiPlayer's: decoded frames go straight onto hardwa
 ## Troubleshooting
 
 - **Logs:** `journalctl -u pipair -f` on either Pi.
-- **"Searching for head…":** check the head's service is running (`systemctl status pipair`) and its log says `advertising as '...'`. `bluetoothctl show` on each Pi should say `Powered: yes`. With several heads nearby, set Settings → Head → *Head to connect to*.
+- **"No head paired":** pair one under Settings → Head pairing. If the list is empty, check the head's service is running (`systemctl status pipair`) and its log says `advertising as '...'`. `bluetoothctl show` on each Pi should say `Powered: yes`.
+- **"Searching for head…":** the paired head is off or out of range.
+- **"Head refused us":** the head was reset or paired with another controller. Forget it on the controller and pair again (release the head with `unpair.sh` first if it still belongs to someone else).
 - **"Head has no display":** the projector is off or unplugged. The head retries every 30 s. To make HDMI come up regardless, see Display modes.
 - **Picture and sound out of step by a steady amount:** set the Picture offset.
 - **Round trip well above 50 ms:** the connection interval setting may not have applied. Check `MinConnectionInterval`/`MaxConnectionInterval` in `/etc/bluetooth/main.conf` on the controller and reboot it.
@@ -170,7 +193,7 @@ The video path on the head is PiPlayer's: decoded frames go straight onto hardwa
 
 The playlist engine, web UI and video renderer come from PiPlayer, which was brought up on a Pi 3 B+ with Trixie.
 
-New in PiPair, and tested so far only on a simulated two-device rig (`tests/test_pair.py`, `tests/test_link.py`): the controller/head protocol, clock sync, resync and link-loss behaviour.
+New in PiPair, and tested so far only on a simulated two-device rig (`tests/test_pair.py`, `tests/test_link.py`, `tests/test_pairing.py`): the controller/head protocol, clock sync, resync and link-loss behaviour, pairing and signed sessions.
 
 **Not yet run on hardware:** the two Bluetooth transports and the audio-only renderer. Expect to debug those on the first bring-up.
 
