@@ -1,64 +1,55 @@
-# PiPlayer
+# PiPair
 
-Fullscreen playlist player for the Raspberry Pi, controlled over the network.
+Two Raspberry Pis that play one show: the **head** shows the picture, the **controller** plays the sound, and a Bluetooth link keeps them together. Built for a projector hidden inside a prop, running on a battery, with the speakers and network somewhere else.
 
-- Boots straight into playback of a **default playlist**, fullscreen on HDMI, with no desktop.
-- **Playlists** of videos and still images. Images have per-item display durations. Each playlist can **loop**, **stop**, **hold** the last frame, or **go to another playlist** when it ends.
-- **Transitions** between items and playlists: **cut**, **dissolve**, or **dip through a color**. You can set them per playlist, per item, per "go to" link, or per cue.
-- **Per-item position offsets** (X/Y). Adjust them live: the ⌖ button on a playlist item puts it on screen in loop-item mode. Drag it in the live preview, nudge it with the arrow keys, or pause and fine-tune.
-- **GPI triggers:** contact closures on the Pi's GPIO pins fire playlists or transport commands (next, stop, pause, and so on). Set them up on the Triggers tab.
-- **Web UI** for playlists, media uploads, settings, transport controls (including loop-item) and a live preview of the output.
-- **REST + WebSocket API** for show controllers and scripts. See [docs/API.md](docs/API.md). The same document is shown on the UI's API tab.
-- Output uses the display's own resolution. On a Pi 3 it runs at 30 Hz (1080p30) when the display supports it, or you can pick any mode the display offers.
-- No authentication. Meant for a trusted LAN.
+PiPair is a fork of [PiPlayer](https://github.com/ncory/PiPlayer) and keeps its playlists, transitions, web UI and API.
+
+- **Head**: a Pi with HDMI out to the projector. No network needed during the show, no web UI. It shows what the controller tells it to, timed on its own clock.
+- **Controller**: a Pi on wired Ethernet with speakers attached. It serves the web UI and the REST + WebSocket API, plays the sound of each item, and drives the head.
+- **Link**: Bluetooth LE. It carries only clock pings and small commands ("start this clip at time T"), never the media, so it needs almost no bandwidth and tolerates a crowded 2.4 GHz band.
+- **Playlists** of videos and still images, with **cut**, **dissolve** and **dip to color** transitions, per-item position offsets, GPIO triggers, and a live preview of the head's picture.
+- If the link drops, the sound carries on and the head keeps showing, and loops, the clip it had. When the link returns the current item restarts on both, together.
+- No authentication, and anyone in Bluetooth range could drive the head. Meant for a trusted LAN and a friendly room.
 
 ## Hardware
 
-| | Pi 3 Model B / B+ | Pi 4 |
+| | Head | Controller |
 |---|---|---|
-| HDMI | full-size | micro-HDMI ×2 |
-| Hardware video decode | H.264 up to 1080p | H.264 up to 1080p, HEVC up to 4K |
-| Recommended content | H.264, ≤1920×1080, ≤30 fps | H.264 or HEVC, 1080p |
+| Tested target | Pi 3 Model B / B+ (Zero 2 W and 3 A+ use the same chip) | Pi 3 Model B / B+ |
+| Needs | HDMI out, onboard Bluetooth | Ethernet, onboard Bluetooth, audio out |
+| Content | H.264, up to 1080p30 (720p suits a pico projector) | the same files, for their sound |
 
-The Pi 3 has 1 GB of RAM (there's no 2 GB Pi 3), which is plenty for this. Start with the Pi 3. The software is identical on both, so switching to a Pi 4 later is just moving the SD card.
+Sound comes from a USB or HAT sound card if the controller has one, otherwise the 3.5 mm jack. Change it under Settings → Audio.
 
-A dissolve between two videos decodes both at once and shows both on screen. Measured on a Pi 3 B+: two 1080p30 H.264 streams decode and display together at full rate. PiPlayer averages about 23% of one CPU core while looping a mixed playlist with dissolves.
+## Setting up the two Pis
 
-## Preparing the Pi
+Use **Raspberry Pi OS Lite (64-bit), Trixie** on both. In Raspberry Pi Imager's OS customization, give them different hostnames (say `pipair-head` and `pipair`), a user, and SSH. The head needs a network only for setup and for copying media; give it Wi-Fi in the Imager or plug it in for now.
 
-Use **Raspberry Pi OS Lite (64-bit), Trixie**. You don't need the desktop: PiPlayer drives the HDMI output directly through DRM/KMS and never uses X11 or Wayland. On the full desktop image, the compositor would own the display, so PiPlayer would have to run inside a desktop session. That costs RAM and GPU time the Pi 3 can't spare, and adds boot time and moving parts.
+Install from this checkout on your computer (asks for each Pi's password):
 
-1. In **Raspberry Pi Imager**, choose *Raspberry Pi OS (other) → Raspberry Pi OS Lite (64-bit)*. In the OS customization settings:
-   - hostname: `piplayer` (the UI will be at `http://piplayer.local/`)
-   - a username and password
-   - enable SSH (public-key auth recommended) and add your key
-   - Wi-Fi if needed (wired Ethernet is recommended for uploading large videos)
-2. Boot it with the HDMI display connected, then SSH in.
-3. Install with one command, run as your normal user (not with `sudo`):
-   ```bash
-   curl -sL "https://github.com/ncory/PiPlayer/raw/refs/heads/main/install.sh" | bash
-   ```
-   It asks for your password once. Raspberry Pi OS Trixie doesn't give the first user passwordless `sudo`. The installer then:
-   - updates the system (`PIPLAYER_SKIP_UPGRADE=1` skips this)
-   - clones PiPlayer into `~/piplayer`
-   - installs the GStreamer, Mesa and Python packages
-   - creates a `piplayer` service user
-   - installs the app to `/opt/piplayer`, with data in `/var/lib/piplayer`
-   - enables the `piplayer` systemd service on port 80
-   - hides boot messages and the tty1 login prompt
-   - reserves 128 MB of video memory (`gpu_mem`) on Pi 4 and earlier
+```bash
+./scripts/push.sh you@pipair-head.local head
+```
 
-   It also lets your user update PiPlayer later without a password: you own `/opt/piplayer` and may start, stop and restart the `piplayer` service and reboot the Pi, and nothing else. The service itself runs as the unprivileged `piplayer` user.
+```bash
+./scripts/push.sh you@pipair.local controller
+```
 
-   Options go in `PIPLAYER_OPTS`, for example:
-   ```bash
-   curl -sL "https://github.com/ncory/PiPlayer/raw/refs/heads/main/install.sh" | PIPLAYER_OPTS="--port 8080 --no-quiet-boot" bash
-   ```
-4. Reboot once (`sudo reboot`), then open `http://<hostname>.local/`, upload media, and build the `default` playlist.
+Reboot both once. The head then advertises itself over Bluetooth under its hostname, and the controller finds it and connects by itself; there is no pairing step. Open `http://pipair.local/`. The pill in the top bar reads **Head connected** when the two are in step.
 
-To update, run the same `curl` command again. Playlists, settings and media are kept.
+Run the same `push.sh` command again to update; the role is remembered, and playlists, settings and media are kept.
 
-From a checkout you can also run the system installer directly: `sudo ./scripts/install.sh [--deploy-user "$USER"] [--port N] [--no-quiet-boot] [--gpu-mem N | --no-gpu-mem]`.
+Once the repository is on GitHub, a Pi can also install itself:
+
+```bash
+curl -sL "https://github.com/ncory/PiPair/raw/refs/heads/main/install.sh" | PIPAIR_ROLE=head bash
+```
+
+The installer:
+- installs GStreamer, BlueZ and the Python packages (all from Debian; nothing from PyPI)
+- creates a `pipair` service user and the `pipair` systemd service, with data in `/var/lib/pipair`
+- **head:** hides boot messages and the login prompt on the HDMI output, and reserves 128 MB of video memory
+- **controller:** serves the UI on port 80 (`--port N` to change), and sets BlueZ to a 7.5-15 ms connection interval in `/etc/bluetooth/main.conf` (the original is kept as `main.conf.pipair-backup`)
 
 ### Video memory (`gpu_mem`)
 
@@ -66,28 +57,42 @@ The hardware H.264 decoder allocates from the firmware's video memory pool, whic
 
 The installer therefore appends `gpu_mem=128` to `/boot/firmware/config.txt` (backing the file up first), which roughly doubles the pool and leaves around 27 MB of headroom. It applies at the next reboot. The installer never overrides a `gpu_mem` you have set yourself; it warns instead if yours is lower. It is skipped on the Pi 5, which has no firmware decoder, and on boards with less than 1 GB of RAM. Use `--no-gpu-mem` to leave `config.txt` untouched.
 
-To check the hardware (display, GL, decoders, audio), run `sudo ./scripts/diag.sh /var/lib/piplayer/media/some-video.mp4`.
+## Media
 
-## Preparing media
+Every file has to be on **both** devices under the same name: the controller plays its sound, the head shows its picture.
 
-The Pi 3 only plays H.264 smoothly. To convert anything else, run this on your Mac/PC:
+1. Upload it in the web UI (Media tab). That puts it on the controller.
+2. Copy the same file to the head:
+   ```bash
+   scp clip.mp4 you@pipair-head.local:/var/lib/pipair/media/
+   ```
+
+The Media tab and the playlist editor flag files the head doesn't have (or has in a different size). The head reports its files every few seconds, so the flag clears by itself.
+
+Convert anything that isn't H.264 before uploading:
 
 ```bash
-ffmpeg -i input.mov -c:v libx264 -profile:v high -level 4.1 -pix_fmt yuv420p \
-  -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30" \
+ffmpeg -i input.mov -c:v libx264 -profile:v high -level 4.0 -pix_fmt yuv420p \
+  -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30" \
   -preset slow -crf 20 -g 60 -movflags +faststart -c:a aac -b:a 192k -ar 48000 output.mp4
 ```
 
-The Media tab warns about files the hardware can't decode well. Images (JPEG/PNG/etc., any size) are rendered once at upload or first use to exactly the output resolution, with letterboxing baked in. Big photos are fine.
+## Lip sync
+
+The controller pings the head a few times a second and works out the difference between their clocks, so "start at T" means the same instant on both. What it can't know is how long your projector takes to show a frame or your amplifier to play a sample. Settings → Head → **Picture offset** covers that: a positive number shows the picture later, a negative one earlier. Set it once with the real projector and speakers; it is saved.
+
+Now Playing → Player shows the link's round-trip time. Around 15-30 ms is normal. The clock estimate uses the fastest recent ping, so occasional slow ones don't matter.
+
+Each item is started in step, and the two devices then run on their own clocks until the next item. Crystals differ by a few parts per million, so a very long clip can drift by some milliseconds per minute; clips of a few minutes stay well inside what the eye notices.
 
 ## Display modes
 
-Settings → *Display mode* is `auto` or any mode the display offers (for example `1920x1080@60`).
+Settings → *Display mode* applies to the head's display. It is `auto` or any mode the display offers (for example `1920x1080@60`).
 
 - `auto` uses the display's preferred resolution. On a Pi 3 it picks the 30 Hz (or else 25 Hz) version of that resolution when the display supports it. The Pi 3's display controller has a fixed pixel budget: at 60 Hz it can show only one 1080p video at a time, so a dissolve between two videos would turn into a cut. At 30 Hz two fit comfortably, and 30 fps content plays without judder.
 - Where that isn't possible (a display that only accepts 50/60 Hz, or a 60 Hz mode you chose), a Pi 3 can't show two 1080p videos at once. Video-to-video dissolves then **freeze the outgoing clip**: it holds its current frame (converted to a still by the Pi's image processor) while the new clip fades in over it with full motion, about ¼ second after the freeze. Cuts, loops with cuts, dips to color, and dissolves to or from images aren't affected. The Playlists page shows a notice when this applies. If the display doesn't list 30 Hz, try forcing `1920x1080@30` in Settings → Display mode: many projectors and TVs accept it anyway.
 
-If the display isn't connected at boot, PiPlayer retries every 30 s and resumes the default playlist once a display appears. To make HDMI come up even when the display is off, add `video=HDMI-A-1:1920x1080@30D` to the end of the single line in `/boot/firmware/cmdline.txt`. The trailing `D` forces the output on.
+If the display isn't connected at boot, PiPair retries every 30 s and resumes the default playlist once a display appears. To make HDMI come up even when the display is off, add `video=HDMI-A-1:1920x1080@30D` to the end of the single line in `/boot/firmware/cmdline.txt`. The trailing `D` forces the output on.
 
 ## GPI triggers (contact closures)
 
@@ -110,67 +115,66 @@ Wiring: connect a switch, button or dry relay contact between a GPIO pin and a G
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install aiohttp pillow pytest pytest-asyncio
-.venv/bin/python -m piplayer --backend sim --data dev-data      # http://localhost:8080
+.venv/bin/python -m pipair --backend sim --data dev-data      # http://localhost:8080
 .venv/bin/python -m pytest
 ```
 
-The `sim` backend models the compositor's timing, layers, fades and pauses exactly. It renders the preview image with Pillow, so the UI, API and playlist logic can be developed without a Pi. On a Linux desktop with GStreamer, `--backend gst --sink window` plays real video in a window.
+Off a Pi, the controller runs a simulated head inside the same process, joined by a loopback link that uses the real message format. The UI, API, playlist logic and the controller/head protocol can all be worked on without hardware. `--role standalone` runs the original single-device player.
 
 ## How it works
 
 ```
-piplayer/
-  web.py          aiohttp REST API, WebSocket status, static UI
-  engine.py       playlists, scheduling, transitions, error recovery (backend-agnostic)
-  backend_kms.py  hardware-plane renderer (the Pi default)
-  kms.py          libdrm atomic modesetting bindings (ctypes)
-  backend_gst.py  GStreamer layer machinery + optional GL-compositing renderer
-  backend_sim.py  simulated renderer for development and tests
-  config.py       settings + playlists, validation, JSON persistence
-  media.py        media library, probing, image pre-rendering
-  gpi.py          GPIO contact-closure triggers (libgpiod)
-  hw.py           Pi model / HDMI / audio detection, health
-  static/         web UI (plain HTML/CSS/JS, no build step)
+pipair/
+  web.py             aiohttp REST API, WebSocket status, static UI      (controller)
+  engine.py          playlists, scheduling, transitions, error recovery (controller)
+  backend_pair.py    the controller's renderer: sound here, picture on the head
+  backend_audio.py   audio-only GStreamer renderer                      (controller)
+  head.py            executes the controller's commands on a video renderer (head)
+  backend_kms.py     hardware-plane video renderer                      (head)
+  link.py            message format, packet framing, clock sync, loopback link
+  ble_central.py     Bluetooth LE transport, controller side (bleak)
+  ble_peripheral.py  Bluetooth LE transport, head side (BlueZ GATT server over D-Bus)
+  backend_gst.py     GStreamer layer machinery shared by the renderers
+  backend_sim.py     simulated renderer for development and tests
+  config.py, media.py, gpi.py, hw.py, kms.py, static/
 ```
 
-There is no GPU compositing. Decoded frames go straight onto hardware display planes, and the display controller (the HVS) positions, scales, alpha-blends and stacks them while it scans out the picture:
+The engine already describes playback as "start this layer at running time T" plus opacity and volume keyframes. PairBackend splits each of those calls: volume and audio start go to the local audio renderer, everything about the picture is sent to the head with its times translated into the head's clock.
 
 ```
-[layer: file ─ decodebin (V4L2 HW decode) ─ fakevideosink] ─┐ decoder's own dmabufs
-[layer ...]                                                 │ (zero copy)
-                                                            ▼
-            presenter thread: one atomic KMS commit per display frame
-              primary plane  = background color
-              overlay planes = one per visible layer (YUV scanout), with alpha + zpos
-              top overlay    = dip color
-[layer audio ...] ─ audiomixer ─ volume ─ alsasink (HDMI)
+controller                                          head
+engine ─ PairBackend ─┬─ AudioBackend ─ speakers
+                      └─ HeadPort ═══ BLE ═══ Head ─ KmsBackend ─ HDMI ─ projector
+                         clock sync, commands        (same renderer as PiPlayer, audio off)
 ```
 
-- Each playlist item becomes a *layer* that is added to the running GStreamer pipeline about 4 s before it's needed. It decodes its first frame and holds it with a blocking pad probe. Starting the layer sets that pad's time offset so the held frame lands on an exact running time, then releases it.
-- Transitions are opacity keyframes. The presenter evaluates them for the next display refresh and applies every plane's frame, position and opacity in a single atomic update, so each refresh shows one consistent frame. Audio fades are keyframes on the audio mixer's pads.
-- A dissolve is a true crossfade: the incoming layer fades in over the outgoing one, which stays fully opaque until the incoming layer is fully opaque, and is then hidden. If the incoming picture has letterbox bars (or is offset), the outgoing picture shows in those areas until the dissolve completes. A dip fades a solid-color plane in and out and cuts between items underneath it at the midpoint.
-- Images are rendered once, at the display resolution, into scanout buffers.
-- Why not the GPU: on the Pi 3 the GPU gets empty textures when it imports the decoder's YUV buffers, and uploading 1080p frames through the CPU runs at about 1 fps. The display controller scans the same buffers out for free. (`--backend gl` keeps a GStreamer GL-compositing renderer for other hardware.)
+- **Clock sync.** Each ping carries four timestamps (sent, received, reply sent, reply received). The sample with the shortest round trip in the last ~12 s gives the offset between the two monotonic clocks. Time a message spends queued is excluded, because the timestamps are taken as it leaves.
+- **Commands.** A handful of small JSON messages: `new` (load a file), `start` (at T), `alpha` (keyframes), `dip`, `pos`, `pause`/`resume`, `rm`. A message is split into BLE packets with a one-byte header and reassembled on the other side.
+- **Scheduling.** Cues are scheduled 0.25-0.6 s ahead so they cross the radio before their time comes.
+- **Images** are fitted to the display on the head, at its resolution.
+- **Losing the head.** The controller treats a missing head as "nothing to wait for": the engine keeps running on sound alone. The head, hearing no pings for 3 s, loops the clip on screen when it ends. A head that (re)appears makes the engine restart the current item on a fresh renderer, which is the only way to start both together.
+
+The video path on the head is PiPlayer's: decoded frames go straight onto hardware display planes, and the display controller positions, scales and alpha-blends them. See PiPlayer's README for the details.
 
 ## Troubleshooting
 
-- **Logs:** `journalctl -u piplayer -f`
-- **Black screen, UI works:** check Now Playing → Player for the display and dropped-frame count. Run `scripts/diag.sh`.
-- **Stutter:** check the file is H.264 ≤1080p30 and the Media tab shows no warnings. Look for under-voltage in the Player panel; the Pi 3 needs a proper 2.5 A supply. Try Settings → Frame rate 25/30.
-- **No audio:** Settings → Audio. `auto` picks the HDMI ALSA device (`vc4hdmi`). If the display has no speakers, audio is disabled automatically after a failure.
-- **Restart video without rebooting:** Settings → *Restart renderer*, or `POST /api/system/restart-renderer`.
+- **Logs:** `journalctl -u pipair -f` on either Pi.
+- **"Searching for head…":** check the head's service is running (`systemctl status pipair`) and its log says `advertising as '...'`. `bluetoothctl show` on each Pi should say `Powered: yes`. With several heads nearby, set Settings → Head → *Head to connect to*.
+- **"Head has no display":** the projector is off or unplugged. The head retries every 30 s. To make HDMI come up regardless, see Display modes.
+- **Picture and sound out of step by a steady amount:** set the Picture offset.
+- **Round trip well above 50 ms:** the connection interval setting may not have applied. Check `MinConnectionInterval`/`MaxConnectionInterval` in `/etc/bluetooth/main.conf` on the controller and reboot it.
+- **No sound:** Settings → Audio. `aplay -l` on the controller lists the cards.
+- **A file plays sound but no picture:** it isn't on the head (the Media tab says so).
 
 ## Status
 
-Brought up on a Raspberry Pi 3 Model B+ (Raspberry Pi OS Lite Trixie, kernel 6.18, GStreamer 1.26) driving a 1080p display. Verified there:
+The playlist engine, web UI and video renderer come from PiPlayer, which was brought up on a Pi 3 B+ with Trixie.
 
-- H.264 1080p30 playback with HDMI audio
-- dissolves between two 1080p videos, and between images and videos
-- dip to color
-- letterboxed 4:3 content
-- pause, loop-item, and live repositioning of the on-screen item while paused
+New in PiPair, and tested so far only on a simulated two-device rig (`tests/test_pair.py`, `tests/test_link.py`): the controller/head protocol, clock sync, resync and link-loss behaviour.
 
-The web UI, API and playlist engine are also covered by tests against the simulated renderer.
+**Not yet run on hardware:** the two Bluetooth transports and the audio-only renderer. Expect to debug those on the first bring-up.
+
+Not done yet: copying media to the head from the web UI (use `scp` for now).
 
 ## License
 

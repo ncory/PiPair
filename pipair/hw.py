@@ -64,16 +64,28 @@ def pick_output() -> dict | None:
     return outs[0] if outs else None
 
 
-def audio_device(setting: str) -> str | None:
-    """Resolve the audio.device setting to an ALSA device string (or None)."""
-    if setting and setting != "auto":
-        return setting
+def audio_cards() -> list[str]:
+    """ALSA card ids, in card order (e.g. ["vc4hdmi", "Headphones"])."""
     cards = _read("/proc/asound/cards") or ""
     # Lines look like: " 0 [vc4hdmi        ]: vc4-hdmi - vc4-hdmi"
-    for m in re.finditer(r"^\s*\d+\s+\[(\S+)\s*\]", cards, re.M):
-        if m.group(1).startswith("vc4hdmi"):
-            return f"default:CARD={m.group(1)}"
-    return None
+    return [m.group(1) for m in re.finditer(r"^\s*\d+\s+\[(\S+)\s*\]", cards, re.M)]
+
+
+def audio_device(setting: str, prefer_hdmi: bool = True) -> str | None:
+    """Resolve the audio.device setting to an ALSA device string (or None).
+
+    "auto" is the HDMI output by default. With `prefer_hdmi` off (the
+    controller, which has no display) it is the first card that is neither
+    HDMI nor the built-in jack (a USB or I2S DAC), then the jack, then HDMI.
+    """
+    if setting and setting != "auto":
+        return setting
+    cards = audio_cards()
+    hdmi = [c for c in cards if c.startswith("vc4hdmi")]
+    jack = [c for c in cards if c == "Headphones"]
+    other = [c for c in cards if c not in hdmi and c not in jack]
+    order = hdmi if prefer_hdmi else other + jack + hdmi
+    return f"default:CARD={order[0]}" if order else None
 
 
 def health() -> dict:

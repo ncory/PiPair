@@ -66,7 +66,7 @@ class LibgpiodDriver:
             direction=Direction.INPUT, edge_detection=Edge.BOTH, active_low=active_low,
             bias={"up": Bias.PULL_UP, "down": Bias.PULL_DOWN, "none": Bias.DISABLED}[pull],
             debounce_period=timedelta(milliseconds=debounce_ms))
-        req = self.gpiod.request_lines(self.chip, consumer="piplayer", config={pin: settings})
+        req = self.gpiod.request_lines(self.chip, consumer="pipair", config={pin: settings})
         return _LibgpiodLine(self, req, pin)
 
 

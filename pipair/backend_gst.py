@@ -133,6 +133,7 @@ class _LayerGst:
 
 class GstBackend(Backend):
     name = "gstreamer"
+    prefer_hdmi_audio = True  # what audio.device "auto" resolves to (see hw.audio_device)
 
     def __init__(self, settings: dict, hw: dict, emit, sink: str = "kms"):
         super().__init__(settings, hw, emit)
@@ -146,7 +147,7 @@ class GstBackend(Backend):
         self.layers: dict[int, Layer] = {}
         self.z = 10
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.teardown = concurrent.futures.ThreadPoolExecutor(1, "piplayer-teardown")
+        self.teardown = concurrent.futures.ThreadPoolExecutor(1, "pipair-teardown")
         self.audio_device: str | None = None
         self.dropped = 0
         self.rendered = 0
@@ -187,7 +188,7 @@ class GstBackend(Backend):
             self.audio_device = "fakesink"
             sink = "fakesink sync=true"
         else:
-            dev = hwmod.audio_device(a["device"])
+            dev = hwmod.audio_device(a["device"], self.prefer_hdmi_audio)
             if not dev or dev in _broken_audio_devices:
                 if dev:
                     log.warning("audio device %s failed earlier; audio disabled", dev)

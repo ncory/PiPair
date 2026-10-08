@@ -8,7 +8,7 @@
 #
 #   * a persistent journal, capped (survives reboots; 25 MB of retry spam can no
 #     longer push out the interesting part)
-#   * systemd-coredump, capped (a real backtrace via `coredumpctl info piplayer`)
+#   * systemd-coredump, capped (a real backtrace via `coredumpctl info pipair`)
 #
 # Both are size-limited so they cannot fill the SD card.  Undo with
 # --disable, which restores the stock behaviour.
@@ -16,8 +16,8 @@ set -euo pipefail
 
 JOURNAL_MAX=${JOURNAL_MAX:-200M}
 CORE_MAX=${CORE_MAX:-200M}
-JOURNAL_DROPIN=/etc/systemd/journald.conf.d/piplayer-diagnostics.conf
-CORE_DROPIN=/etc/systemd/coredump.conf.d/piplayer-diagnostics.conf
+JOURNAL_DROPIN=/etc/systemd/journald.conf.d/pipair-diagnostics.conf
+CORE_DROPIN=/etc/systemd/coredump.conf.d/pipair-diagnostics.conf
 
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 
@@ -41,7 +41,7 @@ fi
 echo "==> Persistent journal, capped at $JOURNAL_MAX"
 install -d -m 0755 "$(dirname "$JOURNAL_DROPIN")"
 cat >"$JOURNAL_DROPIN" <<EOF
-# Installed by PiPlayer (scripts/diagnostics.sh).  Remove this file, or run
+# Installed by PiPair (scripts/diagnostics.sh).  Remove this file, or run
 # the script with --disable, to go back to logs that live only in RAM.
 [Journal]
 Storage=persistent
@@ -55,7 +55,7 @@ systemctl restart systemd-journald
 echo "==> Core dumps, capped at $CORE_MAX"
 install -d -m 0755 "$(dirname "$CORE_DROPIN")"
 cat >"$CORE_DROPIN" <<EOF
-# Installed by PiPlayer (scripts/diagnostics.sh).
+# Installed by PiPair (scripts/diagnostics.sh).
 [Coredump]
 Storage=external
 Compress=yes
@@ -63,16 +63,16 @@ MaxUse=$CORE_MAX
 KeepFree=500M
 EOF
 systemctl daemon-reload
-# The unit also needs LimitCORE=infinity; that ships in scripts/piplayer.service.
-if ! grep -q '^LimitCORE=' /etc/systemd/system/piplayer.service 2>/dev/null; then
-  echo "note: the installed piplayer.service has no LimitCORE=infinity, so core dumps" >&2
+# The unit also needs LimitCORE=infinity; that ships in scripts/pipair.service.
+if ! grep -q '^LimitCORE=' /etc/systemd/system/pipair.service 2>/dev/null; then
+  echo "note: the installed pipair.service has no LimitCORE=infinity, so core dumps" >&2
   echo "      will still be discarded.  Re-run scripts/install.sh to update the unit." >&2
 fi
 
 echo
 echo "Diagnostics enabled."
 echo "  After a crash:   coredumpctl list"
-echo "                   coredumpctl info piplayer     # backtrace"
-echo "  Logs now persist across reboots:  journalctl -u piplayer -b -1"
+echo "                   coredumpctl info pipair     # backtrace"
+echo "  Logs now persist across reboots:  journalctl -u pipair -b -1"
 echo "  Python-level stack on SIGSEGV is printed to the journal by faulthandler."
 echo "  Disk currently used:  $(journalctl --disk-usage 2>/dev/null | sed 's/^.*take up //')"

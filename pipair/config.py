@@ -30,6 +30,7 @@ SIZE_RE = re.compile(r"^(auto|\d{3,4}x\d{3,4})$")
 MODE_RE = re.compile(r"^(auto|\d{3,4}x\d{3,4}(@\d{2,3})?)$")
 MAX_TRANSITION_SECONDS = 30.0
 MAX_OFFSET = 10000  # pixels
+MAX_AV_OFFSET_MS = 2000
 GPI_FIRE_ON = ("close", "open", "both")
 GPI_PULLS = ("up", "down", "none")
 GPI_ACTIONS = ("play", "next", "previous", "stop", "pause", "resume", "toggle", "loop_item")
@@ -44,10 +45,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "output": {"mode": "auto", "render_size": "auto", "fps": 30, "rotation": 0},
     "audio": {"enabled": True, "device": "auto", "volume": 100},
     "gpi": {"enabled": True, "inputs": []},
+    # The Bluetooth link to the head. `peer` is the head's Bluetooth name or
+    # address ("" = any PiPair head in range). `av_offset_ms` moves the
+    # picture relative to the sound (positive = picture later).
+    "link": {"peer": "", "av_offset_ms": 0},
 }
 
 # Settings that require the video pipeline to be rebuilt when changed.
-PIPELINE_SETTINGS = ("output", "audio.enabled", "audio.device")
+PIPELINE_SETTINGS = ("output", "audio.enabled", "audio.device", "link.av_offset_ms")
 
 
 class ValidationError(ValueError):
@@ -138,6 +143,12 @@ def validate_settings(s: dict) -> dict:
         raise ValidationError("audio.device must be 'auto' or an ALSA device name")
     a["volume"] = _num(a["volume"], "audio.volume", 0, 100)
     out["gpi"] = validate_gpi(out["gpi"])
+    ln = out["link"]
+    if not isinstance(ln, dict) or not isinstance(ln.get("peer"), str) or len(ln["peer"]) > 64:
+        raise ValidationError("link.peer must be a Bluetooth name or address (or empty)")
+    out["link"] = {"peer": ln["peer"].strip(),
+                   "av_offset_ms": int(_num(ln.get("av_offset_ms", 0), "link.av_offset_ms",
+                                            -MAX_AV_OFFSET_MS, MAX_AV_OFFSET_MS))}
     return out
 
 

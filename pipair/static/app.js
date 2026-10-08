@@ -1,5 +1,5 @@
 "use strict";
-/* PiPlayer web UI — plain JS, no build step. Talks to the REST API in docs/API.md. */
+/* PiPair web UI — plain JS, no build step. Talks to the REST API in docs/API.md. */
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const S = { status: null, playlists: [], media: [], settings: null, system: null,
@@ -72,14 +72,14 @@ function connect() {
   ws.onclose = () => { $("#conn").classList.remove("ok"); $("#conn").title = "Disconnected"; setTimeout(connect, 2000); };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
-    if (m.type === "status") { S.status = m.status; renderNow(); }
+    if (m.type === "status") { S.status = m.status; renderNow(); renderLink(); }
     else if (m.type === "media") loadMedia();
     else if (m.type === "playlist") loadPlaylists();
     else if (m.type === "settings") { loadSettings(); loadGpi(); }
     else if (m.type === "gpi") onGpiEvent(m);
   };
 }
-async function loadAll() { await Promise.all([loadPlaylists(), loadMedia(), loadSettings(), loadSystem(), loadGpi()]); }
+async function loadAll() { await Promise.all([loadPlaylists(), loadMedia(), loadSettings(), loadSystem(), loadGpi()]); renderSettings(); }
 async function loadPlaylists() {
   S.playlists = await api("GET", "/api/playlists");
   renderQuick(); renderPlaylistList(); renderNow();
@@ -98,7 +98,7 @@ function showTab(name) {
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((s) => s.classList.toggle("active", s.id === "tab-" + name));
   if (name === "api" && !$("#api-doc").childElementCount) loadDoc();
-  try { localStorage.setItem("piplayer.tab", name); } catch {}
+  try { localStorage.setItem("pipair.tab", name); } catch {}
 }
 $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) showTab(b.dataset.tab); });
 
@@ -131,9 +131,9 @@ function transitionEditor(value, { inherit = null, onchange = () => {} } = {}) {
 
 // ------------------------------------------------------------ now playing
 const cue = transitionEditor(null, { inherit: "Playlist default", onchange: (v) => {
-  S.cueTransition = v; try { localStorage.setItem("piplayer.cue", JSON.stringify(v)); } catch {}
+  S.cueTransition = v; try { localStorage.setItem("pipair.cue", JSON.stringify(v)); } catch {}
 } });
-try { S.cueTransition = JSON.parse(localStorage.getItem("piplayer.cue")); cue.set(S.cueTransition); } catch {}
+try { S.cueTransition = JSON.parse(localStorage.getItem("pipair.cue")); cue.set(S.cueTransition); } catch {}
 $("#cue-transition").append(cue.el);
 const cueBody = (extra = {}) => ({ ...extra, ...(S.cueTransition ? { transition: S.cueTransition } : {}) });
 
@@ -204,11 +204,35 @@ function renderCurrentItems() {
     h("span", { class: "muted small" }, it.kind === "image" ? fmt(it.duration ?? S.settings?.default_image_duration) : fmt(it.media_duration)))));
 }
 
+// The Bluetooth link to the head (absent when one device does everything).
+function linkState(l) {
+  if (!l) return null;
+  if (l.ready) return ["ok", "Head connected"];
+  if (l.connected) return ["wait", l.head && l.head.ok === false ? (l.head.no_display ? "Head has no display" : "Head renderer down") : "Head syncing…"];
+  return ["", l.state === "error" ? "Bluetooth error" : "Searching for head…"];
+}
+function renderLink() {
+  const l = S.status?.output?.link || S.system?.link, el = $("#link"), st = linkState(l);
+  el.hidden = !st; if (!st) return;
+  el.className = "linkpill " + st[0]; el.textContent = st[1];
+  el.title = l.ready ? `${l.head?.name || l.device || "head"} · round trip ${l.rtt_ms ?? "?"} ms` : (l.last_error || "");
+}
+
 function renderSys() {
   const s = S.system; if (!s) return;
+  renderLink();
   const r = s.renderer || {}, hl = s.health || {};
+  const l = s.link, hh = l?.head?.health || {};
+  const linkRows = l ? [
+    ["Head link", (linkState(l) || ["", "–"])[1] + (l.device ? ` (${l.head?.name || l.device})` : "")],
+    ["Round trip", l.rtt_ms != null ? `${l.rtt_ms} ms best, ${l.rtt_median_ms} ms typical` : "–"],
+    ["Picture offset", `${r.av_offset_ms ?? 0} ms`],
+    ["Head temperature", hh.temperature_c != null ? hh.temperature_c + " °C" : "–"],
+    ["Head power", hh.throttled ? (hh.throttled.under_voltage_now ? "UNDER-VOLTAGE" : hh.throttled.under_voltage_since_boot ? "under-voltage since boot" : "ok") : "–"],
+  ] : [];
   const rows = [
     ["Device", s.hardware?.model || "not a Raspberry Pi"],
+    ...linkRows,
     ["Renderer", r.backend + (r.sink ? ` (${r.sink})` : "")],
     ["Display", r.display ? `${r.display.connector} ${r.display.mode || ""}${r.display.connected ? "" : " (disconnected)"}` : "–"],
     ["Output", r.render_size ? `${r.render_size.join("×")} @ ${r.fps} ${r.backend === "kms" ? "Hz (hardware planes)" : "fps"}` : "–"],
@@ -236,7 +260,7 @@ function schedulePreview() {
     img.src = "/api/preview.jpg?t=" + Date.now();
   }, 1500);
 }
-$("#preview-toggle").onchange = () => { try { localStorage.setItem("piplayer.preview", $("#preview-toggle").checked ? "1" : "0"); } catch {} schedulePreview(); };
+$("#preview-toggle").onchange = () => { try { localStorage.setItem("pipair.preview", $("#preview-toggle").checked ? "1" : "0"); } catch {} schedulePreview(); };
 
 // --------------------------------------------------------------- playlists
 function renderPlaylistList() {
@@ -333,7 +357,7 @@ function renderItems(d) {
       ondrop: (e) => { e.preventDefault(); li.classList.remove("drag-over"); if (dragFrom != null && dragFrom !== i) { const [x] = d.items.splice(dragFrom, 1); d.items.splice(i, 0, x); markDirty(); renderEditor(); } } },
       h("span", { class: "handle", title: "Drag to reorder" }, "⋮⋮"),
       thumb,
-      h("div", {}, h("div", { class: "iname", title: it.media }, `${i + 1}. ${it.media}${media ? "" : " (missing)"}`), meta),
+      h("div", {}, h("div", { class: "iname", title: it.media }, `${i + 1}. ${it.media}${media ? "" : " (missing)"}${media && it.head_warning ? " (not on the head)" : ""}`), meta),
       h("div", { class: "iactions" },
         h("button", { class: "icon-btn", title: "Position on screen", onclick: () => openPositioner(it) }, "⌖"),
         h("button", { class: "icon-btn", title: "Move up", disabled: i === 0, onclick: () => move(i - 1) }, "↑"),
@@ -532,6 +556,7 @@ function renderSettings() {
   const sizes = [["auto", "Auto (match display, max 1080p)"], ...["1920x1080", "1280x720", "1080x1920", ...modes].filter((v, i, a) => a.indexOf(v) === i).map((m) => [m, m])];
   const renderer = S.system?.renderer || {};
   const kmsMode = renderer.backend === "kms";
+  const paired = !!S.system?.link;
   const dispModes = [["auto", "Auto (display's resolution; 30 Hz on a Pi 3)"], ...(renderer.display?.modes || []).map((m) => [m, m.replace("@", " @ ") + " Hz"]),
     ...(renderer.display?.forceable || []).map((m) => [m, m.replace("@", " @ ") + " Hz — forced (the display doesn't list it)"])];
   if (s.output.mode && !dispModes.some(([v]) => v === s.output.mode)) dispModes.push([s.output.mode, s.output.mode]);
@@ -558,13 +583,24 @@ function renderSettings() {
       h("p", { class: "hint" }, kmsMode
         ? "Video goes straight to the display hardware at the display's resolution. On a Pi 3, Auto picks 30 Hz when the display supports it: at 60 Hz the Pi 3 can't show two 1080p videos at once, so dissolves between videos would become cuts. Changing the mode briefly restarts playback."
         : "Video is composited at this resolution and scaled to the display's preferred mode. Changing output settings briefly restarts playback.")),
+    paired ? h("fieldset", {}, h("legend", {}, "Head"),
+      h("div", { class: "row" },
+        h("label", { class: "field" }, h("span", {}, "Picture offset (ms)"),
+          h("input", { type: "number", name: "av_offset_ms", min: -2000, max: 2000, step: 5, value: s.link.av_offset_ms, style: { width: "110px" } })),
+        h("label", { class: "field" }, h("span", {}, "Head to connect to"),
+          h("input", { type: "text", name: "link_peer", value: s.link.peer, placeholder: "any PiPair head", style: { width: "220px" } }))),
+      h("p", { class: "hint" },
+        "Picture offset moves the picture against the sound: a positive number shows it later, a negative one earlier. Use it to line up lips and voice once the projector and speakers are in place. Saving a new offset restarts the current item."),
+      h("p", { class: "hint" },
+        "Leave the head blank to use whichever PiPair head is in range, or enter one head's Bluetooth name (its hostname) or address when several are nearby.")) : null,
     h("fieldset", {}, h("legend", {}, "Audio"),
       h("div", { class: "row" },
         h("label", { class: "check" }, h("input", { type: "checkbox", name: "audio_enabled", checked: s.audio.enabled }), "Play audio"),
         h("label", { class: "field" }, h("span", {}, "ALSA device"), h("input", { type: "text", name: "audio_device", value: s.audio.device, style: { width: "220px" } })),
         h("div", { class: "field" }, h("span", {}, "Volume"), h("span", {}, vol, " ", volLabel))),
       h("p", { class: "hint" },
-        "Leave the device on ", h("code", {}, "auto"), " to play through HDMI. To choose an output yourself: ",
+        paired ? "On auto, sound goes to a USB or HAT sound card if one is fitted, otherwise the 3.5 mm jack. To choose an output yourself: "
+          : "Leave the device on auto to play through HDMI. To choose an output yourself: ",
         h("code", {}, "default:CARD=vc4hdmi"), " is the HDMI port, and ",
         h("code", {}, "default:CARD=Headphones"), " is the 3.5 mm analog jack. On a Pi 4 or 5, which has two HDMI ports, use ",
         h("code", {}, "default:CARD=vc4hdmi0"), " or ", h("code", {}, "default:CARD=vc4hdmi1"), "."),
@@ -587,6 +623,7 @@ function renderSettings() {
       output: kmsMode ? { mode: v("mode") }
         : { mode: v("mode"), render_size: v("render_size"), fps: Number(v("fps")), rotation: Number(v("rotation")) },
       audio: { enabled: f.elements.audio_enabled.checked, device: v("audio_device") || "auto", volume: Number(v("volume")) },
+      ...(paired ? { link: { peer: v("link_peer").trim(), av_offset_ms: Number(v("av_offset_ms")) || 0 } } : {}),
     }), "Settings saved");
     document.activeElement?.blur(); await loadSettings();
   };
@@ -726,8 +763,8 @@ function markdown(src) {
 }
 
 // ------------------------------------------------------------------- boot
-try { $("#preview-toggle").checked = localStorage.getItem("piplayer.preview") !== "0"; } catch {}
-try { const t = localStorage.getItem("piplayer.tab"); if (t && $("#tab-" + t)) showTab(t); } catch {}
+try { $("#preview-toggle").checked = localStorage.getItem("pipair.preview") !== "0"; } catch {}
+try { const t = localStorage.getItem("pipair.tab"); if (t && $("#tab-" + t)) showTab(t); } catch {}
 api("GET", "/api/status").then((st) => { S.status = st; renderNow(); }).catch(() => {});
 connect();
 schedulePreview();

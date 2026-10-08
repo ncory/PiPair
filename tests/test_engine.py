@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from piplayer import backend_sim
-from piplayer.backend_sim import SimBackend
-from piplayer.config import Store, ValidationError
-from piplayer.engine import Engine
-from piplayer.media import MediaLibrary
-from piplayer.backend import NoDisplayError, classify_error
+from pipair import backend_sim
+from pipair.backend_sim import SimBackend
+from pipair.config import Store, ValidationError
+from pipair.engine import Engine
+from pipair.media import MediaLibrary
+from pipair.backend import NoDisplayError, classify_error
 
 HW = {"model": None, "family": None, "is_pi": False, "memory_mb": None}
 CUT = {"type": "cut"}
@@ -338,7 +338,7 @@ async def test_loop_item(data):
 async def test_constrained_display_freezes_outgoing_video(data):
     """Where two videos can't be on screen at once, a video-to-video dissolve
     freezes the outgoing clip, then fades the new one in over the still."""
-    from piplayer import engine as engine_mod
+    from pipair import engine as engine_mod
 
     eng = await make_engine(data, [{
         "id": "default", "items": [{"media": "clip.mp4"}, {"media": "clip2.mp4"}, {"media": "red.png", "duration": 5}],

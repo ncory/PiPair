@@ -1,10 +1,14 @@
 [project]
-name = "piplayer"
+name = "pipair"
 version = "0.1.0"
-description = "Network-controlled fullscreen playlist player for Raspberry Pi"
+description = "Two Raspberry Pis, one show: picture on one, sound on the other, kept in step over Bluetooth"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = ["aiohttp>=3.9", "pillow>=9"]
+
+[project.optional-dependencies]
+# The Bluetooth link (Linux/BlueZ only). On the Pi these come from apt.
+ble = ["bleak>=0.21", "dbus-fast>=2.20"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

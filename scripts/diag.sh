@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Hardware bring-up checks for PiPlayer. Run on the Pi:  sudo ./scripts/diag.sh [video.mp4]
-# Stops the piplayer service while testing (it needs the display) and restarts it afterwards.
+# Hardware bring-up checks for PiPair. Run on the Pi:  sudo ./scripts/diag.sh [video.mp4]
+# Stops the pipair service while testing (it needs the display) and restarts it afterwards.
 set -uo pipefail
 
 VIDEO="${1:-}"
@@ -34,7 +34,7 @@ done
 hdr "Audio"
 cat /proc/asound/cards 2>/dev/null | sed 's/^/  /'
 
-systemctl is-active --quiet piplayer && { echo; echo "Stopping piplayer for the tests..."; systemctl stop piplayer; RESTART=1; }
+systemctl is-active --quiet pipair && { echo; echo "Stopping pipair for the tests..."; systemctl stop pipair; RESTART=1; }
 
 HDMI=$(ls -d /sys/class/drm/card*-HDMI-A-* 2>/dev/null | while read -r c; do
   [[ $(cat "$c/status") == connected ]] && basename "$c" && break; done)
@@ -65,4 +65,4 @@ if [[ -n "$VIDEO" ]]; then
   fi
 fi
 
-[[ "${RESTART:-0}" == 1 ]] && { echo; systemctl start piplayer && echo "piplayer restarted"; }
+[[ "${RESTART:-0}" == 1 ]] && { echo; systemctl start pipair && echo "pipair restarted"; }

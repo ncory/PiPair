@@ -119,7 +119,7 @@ class KmsBackend(GstBackend):
         self.forced_mode = False
         self.video_overlap_ok = True  # can two full-size videos be on screen at once?
         self.freezer = _Freezer()
-        self.convert_pool = concurrent.futures.ThreadPoolExecutor(1, "piplayer-freeze")
+        self.convert_pool = concurrent.futures.ThreadPoolExecutor(1, "pipair-freeze")
         self.bg_suppress_until = 0.0
         self.commit_failures = 0
         # Live connector state, re-read from sysfs at most once a second:
@@ -695,7 +695,7 @@ class _Presenter(threading.Thread):
     """Commits plane updates once per display frame (or when idle, on change)."""
 
     def __init__(self, be: KmsBackend):
-        super().__init__(name="piplayer-present", daemon=True)
+        super().__init__(name="pipair-present", daemon=True)
         self.be = be
         self.event = threading.Event()
         self._stop = False

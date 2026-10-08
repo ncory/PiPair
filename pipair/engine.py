@@ -100,6 +100,11 @@ class Engine:
         self._restart_attempts = 0
         self._restarting = False
         self._restart_scheduled = False
+        self._resync_reason: str | None = None  # a resync asked for mid-restart
+        # The item most recently asked for (None after a stop). A renderer
+        # restart resumes this, so a restart that lands while an item is still
+        # loading does not forget it.
+        self._intent: Target | None = None
         self._resume_target: Target | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         store.on_change(self._on_store_change)
@@ -160,8 +165,8 @@ class Engine:
         self._restarting = True
         try:
             log.warning("restarting renderer%s", f": {reason}" if reason else "")
-            if resume is None and self.state in ("playing", "paused", "held"):
-                resume = self.target
+            if resume is None:
+                resume = self._intent
             self.token += 1
             self.current = None
             self.pending = None
@@ -183,6 +188,8 @@ class Engine:
         finally:
             self._restarting = False
             self._notify()
+            if self._resync_reason:
+                self._resync(self._resync_reason)
 
     # ------------------------------------------------------------ listeners
     def on_status(self, fn: Callable[[dict], None]) -> None:
@@ -297,7 +304,7 @@ class Engine:
         if self.state != "paused" or not self.current or not self.backend:
             return
         layer = self.current
-        shift = self.backend.now() + START_MARGIN - layer.paused_at
+        shift = self.backend.now() + self._margin() - layer.paused_at
         layer.paused_total += shift
         layer.paused_at = None
         self.backend.resume_layer(layer, shift)
@@ -316,6 +323,10 @@ class Engine:
     async def _switch(self, target: Target | str, transition: dict, manual: bool,
                       at: float | None = None) -> None:
         assert self.backend
+        if isinstance(target, Target):
+            self._intent = target
+        elif target == STOP:
+            self._intent = None
         if not self.backend_ok:
             # renderer is down; remember the request and apply it on recovery
             self._resume_target = target if isinstance(target, Target) else None
@@ -361,7 +372,7 @@ class Engine:
         b = self.backend
         assert b
         now = b.now()
-        t0 = max(at, now + START_MARGIN)
+        t0 = max(at, now + self._margin())
         old = self.current
         for lyr, _ in self.outgoing:  # anything still fading out goes away now
             b.remove_layer(lyr)
@@ -466,7 +477,10 @@ class Engine:
             return self._failed_layer(Source(kind or "video", self.library.media_dir, name),
                                       "file not found")
         try:
-            if kind == "image":
+            if kind == "image" and self.backend.renders_images:
+                src = Source("image", self.library.path(name), name, fit, offset=offset,
+                             uid=item["uid"])
+            elif kind == "image":
                 w, h = self.backend.render_size
                 path = await asyncio.to_thread(self.library.rendered_image, name, w, h, fit,
                                                settings["background_color"])
@@ -528,6 +542,9 @@ class Engine:
             self._error(f"renderer failed: {detail}")
             asyncio.create_task(self._restart_after_failure(str(detail)))
             return
+        if event == "resync":
+            self._resync(str(detail))
+            return
         if layer is None or layer.state == "removed":
             return
         if event == "ready":
@@ -557,6 +574,22 @@ class Engine:
         await self.restart_backend(reason, resume=self._resume_target)
         if self.backend_ok:
             self._resume_target = None
+
+    def _resync(self, reason: str) -> None:
+        """Start the current item again on a fresh renderer.
+
+        Asked for by a backend whose other half (the head) has just appeared
+        or come back: it is not a fault, and the only way to line the two
+        devices up again is to start the item together.
+        """
+        if self._restarting:
+            self._resync_reason = reason  # picked up when that restart finishes
+            return
+        self._resync_reason = None
+        asyncio.create_task(self.restart_backend(reason))
+
+    def _margin(self) -> float:
+        return getattr(self.backend, "start_margin", START_MARGIN)
 
     def _on_layer_error(self, layer: Layer, msg: str) -> None:
         self._error(f"{layer.source.media}: {msg}")
@@ -592,7 +625,8 @@ class Engine:
         if what == "settings":
             s = self.store.settings
             if detail and detail.get("rebuild"):
-                asyncio.create_task(self.restart_backend("output settings changed"))
+                if self._tick_task:  # before start() the new settings are simply the settings
+                    asyncio.create_task(self.restart_backend("output settings changed"))
                 return
             if self.backend:
                 self.backend.set_background(s["background_color"])
@@ -699,7 +733,7 @@ class Engine:
         remaining = dur - pos
         if isinstance(nxt, Target) and remaining <= PRELOAD_LEAD + tdur:
             self._ensure_preload(nxt)
-        if cur.eos or remaining <= tdur + LOOKAHEAD:
+        if cur.eos or remaining <= tdur + getattr(b, "lookahead", LOOKAHEAD):
             at = cur.start_time + cur.paused_total + max(0.0, dur - tdur)
             self._request_auto(nxt, trans, at)
 

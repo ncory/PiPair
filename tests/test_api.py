@@ -9,11 +9,11 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
-from piplayer.backend_sim import SimBackend
-from piplayer.config import Store
-from piplayer.engine import Engine
-from piplayer.media import MediaLibrary
-from piplayer.web import build_app
+from pipair.backend_sim import SimBackend
+from pipair.config import Store
+from pipair.engine import Engine
+from pipair.media import MediaLibrary
+from pipair.web import build_app
 
 HW = {"model": None, "family": None, "is_pi": False, "memory_mb": None}
 
@@ -98,7 +98,7 @@ async def test_settings_and_system(client):
     assert sysinfo["renderer"]["backend"] == "sim"
     assert (await client.get("/api/preview.jpg")).status == 200
     doc = await (await client.get("/api/docs")).text()
-    assert doc.startswith("# PiPlayer HTTP API")
+    assert doc.startswith("# PiPair HTTP API")
 
 
 async def test_websocket_pushes_status(client):

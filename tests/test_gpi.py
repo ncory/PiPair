@@ -9,12 +9,12 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
-from piplayer.backend_sim import SimBackend
-from piplayer.config import Store, ValidationError
-from piplayer.engine import Engine
-from piplayer.gpi import GpiManager
-from piplayer.media import MediaLibrary
-from piplayer.web import build_app
+from pipair.backend_sim import SimBackend
+from pipair.config import Store, ValidationError
+from pipair.engine import Engine
+from pipair.gpi import GpiManager
+from pipair.media import MediaLibrary
+from pipair.web import build_app
 
 HW = {"model": None, "family": None, "is_pi": False, "memory_mb": None}
 

@@ -69,12 +69,15 @@ async def cors_mw(request: web.Request, handler):
 
 class Api:
     def __init__(self, store: Store, library: MediaLibrary, engine: Engine, hw: dict,
-                 gpi: GpiManager | None = None):
+                 gpi: GpiManager | None = None, port=None):
         self.store = store
         self.library = library
         self.engine = engine
         self.hw = hw
         self.gpi = gpi
+        self.port = port  # backend_pair.HeadPort when there is a head, else None
+        if port:
+            port.on_change(self._head_changed)
         if gpi:
             gpi.on_event(self.broadcast)
         self.sockets: set[web.WebSocketResponse] = set()
@@ -119,6 +122,22 @@ class Api:
                 continue
             asyncio.ensure_future(ws.send_str(data))
 
+    def _head_changed(self) -> None:
+        """The link went up or down, or the head's files changed."""
+        self.broadcast({"type": "media"})
+        self.broadcast({"type": "status", "status": self.engine.status()})
+
+    def head_warning(self, name: str, size: int | None = None) -> str | None:
+        """Why the head can't show this file, if we know it can't."""
+        files = self.port.media if self.port else None
+        if files is None:
+            return None  # no head, or it has not told us yet
+        if name not in files:
+            return "Not on the head: copy this file to the head's media folder."
+        if size is not None and files[name] != size:
+            return "The head has a different version of this file (the sizes differ)."
+        return None
+
     async def ticker(self) -> None:
         """Push position updates to UI clients while something is playing."""
         while True:
@@ -132,6 +151,7 @@ class Api:
             e = dict(it)
             e["kind"] = media_kind(it["media"])
             e["missing"] = not self.library.exists(it["media"])
+            e["head_warning"] = self.head_warning(it["media"])
             info = self.library.info(it["media"])
             e["media_duration"] = info.get("duration") if info else None
             items.append(e)
@@ -225,6 +245,9 @@ class Api:
         items = self.library.list()
         for e in items:
             e["used_by"] = self.store.media_usage(e["name"])
+            warn = self.head_warning(e["name"], e["size"])
+            if warn:
+                e["warnings"] = [warn, *e["warnings"]]
         return _json(items)
 
     async def get_media(self, request):
@@ -332,7 +355,9 @@ class Api:
         return _json({
             "version": __version__,
             "hardware": self.hw,
-            "outputs": hwmod.hdmi_outputs(),
+            # With a head, the display is the head's and is described by "renderer".
+            "outputs": [] if self.port else hwmod.hdmi_outputs(),
+            "link": self.port.info() if self.port else None,
             "health": self.engine.health(),
             "renderer": self.engine.backend.info() if self.engine.backend else None,
             "uptime": round(time.time() - self.started),
@@ -372,8 +397,8 @@ class Api:
 
 
 def build_app(store: Store, library: MediaLibrary, engine: Engine, hw: dict,
-              gpi: GpiManager | None = None) -> web.Application:
-    api = Api(store, library, engine, hw, gpi)
+              gpi: GpiManager | None = None, port=None) -> web.Application:
+    api = Api(store, library, engine, hw, gpi, port)
     app = web.Application(middlewares=[cors_mw, errors_mw], client_max_size=4 * 1024 * 1024)
     r = app.router
     transport = [

@@ -147,6 +147,10 @@ class Backend:
         self.emit = emit
         self.render_size: tuple[int, int] = (1920, 1080)
 
+    # True when the backend fits images to the output itself (the head does,
+    # at its own resolution); the engine then hands it the original file.
+    renders_images = False
+
     # False when two full-size videos can't be on screen at once (Pi 3 at 50/60 Hz):
     # the engine then freezes the outgoing video during video-to-video dissolves.
     video_overlap_ok = True

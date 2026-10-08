@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PiPlayer</title>
+<title>PiPair</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c2185b'/><path d='M12 9l12 7-12 7z' fill='white'/></svg>">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="logo">▶</span> PiPlayer</div>
+  <div class="brand"><span class="logo">▶</span> PiPair</div>
   <nav id="tabs">
     <button data-tab="now" class="active">Now Playing</button>
     <button data-tab="playlists">Playlists</button>
@@ -18,6 +18,7 @@
     <button data-tab="settings">Settings</button>
     <button data-tab="api">API</button>
   </nav>
+  <div id="link" class="linkpill" hidden></div>
   <div id="conn" class="conn" title="Connection to player">●</div>
 </header>
 

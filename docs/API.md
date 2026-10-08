@@ -1,9 +1,9 @@
-# PiPlayer HTTP API
+# PiPair HTTP API
 
 Base URL: `http://<pi-address>/` (port 80 when installed as a service, 8080 when run by hand).
 
 - Requests and responses are JSON (`Content-Type: application/json`).
-- There is **no authentication**. PiPlayer is meant for a trusted LAN only.
+- There is **no authentication**. PiPair is meant for a trusted LAN only.
 - CORS is open (`Access-Control-Allow-Origin: *`), so any web page or control system can call it.
 - Errors return a non-2xx status and `{"error": "message"}` (400 = invalid input, 404 = unknown playlist/media, 409 = conflict).
 - Transport commands accept **POST or GET**. Parameters can be sent as a JSON body or as query-string parameters, so simple show controllers that can only fire a URL work too, for example `GET /api/playlists/lobby/play?transition=dissolve&duration=2`.
@@ -131,11 +131,11 @@ All transport endpoints return the new status. The optional `transition` paramet
 Examples:
 
 ```bash
-curl -X POST http://piplayer.local/api/playlists/lobby/play
-curl -X POST http://piplayer.local/api/next -H 'Content-Type: application/json' \
+curl -X POST http://pipair.local/api/playlists/lobby/play
+curl -X POST http://pipair.local/api/next -H 'Content-Type: application/json' \
      -d '{"transition": {"type": "dip", "duration": 2, "color": "#ffffff"}}'
-curl 'http://piplayer.local/api/play?playlist=show&index=3&transition=cut'
-curl -X POST http://piplayer.local/api/stop
+curl 'http://pipair.local/api/play?playlist=show&index=3&transition=cut'
+curl -X POST http://pipair.local/api/stop
 ```
 
 ## Playlists
@@ -155,16 +155,16 @@ Edits apply live: if you change the playing playlist, playback continues from th
 Nudging an item's position while it's on screen:
 
 ```bash
-curl -X POST http://piplayer.local/api/playlists/lobby/play -d '{"index": 1, "transition": "cut"}' -H 'Content-Type: application/json'
-curl -X POST 'http://piplayer.local/api/loop-item?enabled=true'
-curl -X POST http://piplayer.local/api/pause                  # optional: freeze a video frame
-curl -X PATCH http://piplayer.local/api/playlists/lobby/items/e5f6a7b8 \
+curl -X POST http://pipair.local/api/playlists/lobby/play -d '{"index": 1, "transition": "cut"}' -H 'Content-Type: application/json'
+curl -X POST 'http://pipair.local/api/loop-item?enabled=true'
+curl -X POST http://pipair.local/api/pause                  # optional: freeze a video frame
+curl -X PATCH http://pipair.local/api/playlists/lobby/items/e5f6a7b8 \
      -H 'Content-Type: application/json' -d '{"offset_x": -40, "offset_y": 12}'
-curl -X POST 'http://piplayer.local/api/loop-item?enabled=false'
+curl -X POST 'http://pipair.local/api/loop-item?enabled=false'
 ```
 
 ```bash
-curl -X POST http://piplayer.local/api/playlists -H 'Content-Type: application/json' -d '{
+curl -X POST http://pipair.local/api/playlists -H 'Content-Type: application/json' -d '{
   "id": "lobby", "name": "Lobby Loop",
   "items": [{"media": "welcome.mp4"}, {"media": "menu.png", "duration": 8}],
   "transition": "dissolve", "end_action": "loop"}'
@@ -182,10 +182,10 @@ curl -X POST http://piplayer.local/api/playlists -H 'Content-Type: application/j
 | `DELETE /api/media/{name}` | `409` if playlists use it; add `?force=1` to delete it and remove it from those playlists. |
 
 ```bash
-curl -F file=@welcome.mp4 -F file=@menu.png http://piplayer.local/api/media
+curl -F file=@welcome.mp4 -F file=@menu.png http://pipair.local/api/media
 ```
 
-Files can also be copied straight into the media directory (`/var/lib/piplayer/media` on an installed Pi) with `scp` or `rsync`. They appear automatically.
+Files can also be copied straight into the media directory (`/var/lib/pipair/media` on an installed Pi) with `scp` or `rsync`. They appear automatically.
 
 Supported extensions: videos `.mp4 .m4v .mov .mkv .webm .avi .ts .mpg .mpeg`; images `.jpg .jpeg .png .bmp .gif .webp .tif .tiff`. Only files the Pi can decode in hardware play smoothly. See the README for encoding guidance.
 
@@ -206,7 +206,8 @@ Send only the fields to change; nested objects are merged.
   "background_color": "#000000",
   "output": {"mode": "auto"},
   "audio": {"enabled": true, "device": "auto", "volume": 100},
-  "gpi": {"enabled": true, "inputs": []}
+  "gpi": {"enabled": true, "inputs": []},
+  "link": {"peer": "", "av_offset_ms": 0}
 }
 ```
 
@@ -216,12 +217,43 @@ Send only the fields to change; nested objects are merged.
 | `background_color` | Shown when stopped and behind letterboxed content. Applies live. |
 | `output.mode` | Display mode: `auto`, `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ`. `auto` uses the display's preferred resolution; on a Pi 3 it prefers 30 Hz so two 1080p videos can be on screen at once for dissolves. `/api/status` → `output.display.modes` lists what the display supports. |
 | `output.render_size`, `output.fps`, `output.rotation` | Only used by the optional GL-compositing renderer (`--backend gl`). |
-| `audio.device` | `auto` (the HDMI port) or an ALSA device string such as `default:CARD=vc4hdmi`. |
+| `audio.device` | `auto` or an ALSA device string such as `default:CARD=Headphones`. On the controller `auto` is a USB or HAT sound card if one is fitted, otherwise the 3.5 mm jack, otherwise HDMI. |
+| `link.av_offset_ms` | Moves the picture against the sound, in milliseconds (-2000 to 2000). Positive shows the picture later. Changing it restarts the current item. |
+| `link.peer` | Which head to connect to: its Bluetooth name (its hostname) or address. Empty connects to any PiPair head in range. |
 | `audio.volume` | 0-100; applies live. |
 
 Changing `output.*`, `audio.enabled` or `audio.device` restarts the renderer (about 1-2 s of black), then resumes the current item.
 
 On the Pi's default renderer, the `output` object in `/api/status` also includes `frames_presented` (display updates), `commit_failures`, `display.modes`, `display.forceable` (standard modes you can force even though the display doesn't list them), and `display.forced`. When `video_overlap` is `false`, the display can't show two videos at once; `limits` then describes the consequence: video-to-video dissolves freeze the outgoing clip.
+
+## The head link
+
+The API is served by the controller. The picture is shown by the head, which the controller drives over Bluetooth LE; everything in `output` except `audio_device` describes the head's display.
+
+`/api/status` → `output.link` (also `/api/system` → `link`):
+
+```json
+{
+  "transport": "ble", "connected": true, "synced": true, "ready": true,
+  "state": "connected", "device": "pipair-head", "address": "B8:27:EB:12:34:56",
+  "rtt_ms": 16.2, "rtt_median_ms": 23.9, "last_error": null,
+  "head": {"name": "pipair-head", "version": "0.1.0", "ok": true, "no_display": false,
+           "media_files": 4, "health": {"temperature_c": 51.2}}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `connected` | The Bluetooth connection is up. |
+| `synced` | The controller has measured the difference between the two devices' clocks. |
+| `ready` | Connected, synced, and the head's renderer is running. Only then is there a picture. Watch this one field to monitor the head. |
+| `state` | `searching`, `connecting`, `connected` or `error` (see `last_error`). |
+| `rtt_ms`, `rtt_median_ms` | Best and typical ping round trip over the last few seconds. |
+| `head.ok` | `false` while the head's renderer is down; `head.no_display` says whether that is for want of a display. |
+
+While the head is away the controller keeps playing sound and the head keeps showing (and looping) the clip it had. When the head becomes `ready` the current item restarts on both, so they start together.
+
+Media files must be on both devices under the same name. `GET /api/media` adds a warning to each file the head lacks, and playlist items carry `head_warning` (a string, or `null`).
 
 ## GPI triggers
 
@@ -246,7 +278,7 @@ Contact closures on GPIO pins that fire actions. The inputs are stored in settin
 }
 ```
 
-`state` is the live contact state (`open`/`closed`). `count`, `last` and `last_error` describe firings since PiPlayer started. `available: false` with an `error` means GPIO can't be used (for example, not on a Pi).
+`state` is the live contact state (`open`/`closed`). `count`, `last` and `last_error` describe firings since PiPair started. `available: false` with an `error` means GPIO can't be used (for example, not on a Pi).
 
 ### `PUT /api/gpi`
 

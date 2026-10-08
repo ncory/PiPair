@@ -1,19 +1,20 @@
 [Unit]
-Description=PiPlayer network-controlled video player
-After=network-online.target sound.target systemd-udev-settle.service
-Wants=network-online.target
+Description=PiPair synchronized video player (@ROLE@)
+After=network-online.target sound.target bluetooth.target systemd-udev-settle.service
+Wants=network-online.target bluetooth.target
 
 [Service]
 Type=simple
-User=piplayer
-Group=piplayer
-SupplementaryGroups=video render audio gpio
-WorkingDirectory=/opt/piplayer
+User=pipair
+Group=pipair
+SupplementaryGroups=video render audio gpio bluetooth
+WorkingDirectory=/opt/pipair
 Environment=PYTHONUNBUFFERED=1
-Environment=PIPLAYER_DATA=/var/lib/piplayer
-Environment=PIPLAYER_PORT=@PORT@
-Environment=PIPLAYER_BACKEND=kms
-ExecStart=/usr/bin/python3 -m piplayer
+Environment=PIPAIR_DATA=/var/lib/pipair
+Environment=PIPAIR_PORT=@PORT@
+Environment=PIPAIR_ROLE=@ROLE@
+Environment=PIPAIR_BACKEND=kms
+ExecStart=/usr/bin/python3 -m pipair
 # bind to port 80 without running as root
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Headroom for file descriptors (dmabufs, V4L2 devices, sockets)
