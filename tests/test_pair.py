@@ -113,7 +113,9 @@ def synced_and_playing(rig: Rig):
     def check() -> bool:
         cur = rig.engine.current
         return bool(rig.port.ready and rig.engine.state == "playing" and cur
-                    and cur.id in rig.head.layers and rig.head_playing())
+                    and cur.id in rig.head.layers
+                    and rig.head.layers[cur.id].start_time is not None  # "start" has landed
+                    and rig.head_playing())
     return check
 
 
